@@ -17,3 +17,7 @@ Parola di attivazione personalizzata **"Hey Claudio"** per l'assistente vocale [
 Con la voce vera i risultati possono essere un po' diversi: se si attiva poco o troppo, il modello si può riaddestrare cambiando la sensibilità.
 
 Addestramento basato su [openWakeWord](https://github.com/dscripka/openWakeWord) e [openwakeword-colab-2026](https://github.com/alfiedennen/openwakeword-colab-2026) (licenza MIT).
+
+## Dicio per Claude
+
+Versione modificata di Dicio in cui "Hey Claudio" apre direttamente Claude come assistente vocale, senza dover dire "apri Claude". Le modifiche sono in `dicio-per-claude/dicio-per-claude.patch` (da applicare al commit di Dicio indicato in `BASE_COMMIT`, copiando anche `hey_claudio.tflite` in `app/src/main/assets/`).
