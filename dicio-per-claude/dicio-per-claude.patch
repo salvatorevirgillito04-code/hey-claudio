@@ -1,8 +1,8 @@
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index f7ffad9..c895b87 100644
+index f7ffad9..a05aa0b 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
-@@ -30,7 +30,7 @@ android {
+@@ -30,10 +30,10 @@ android {
      compileSdk = libs.versions.compileSdk.get().toInt()
  
      defaultConfig {
@@ -10,7 +10,11 @@ index f7ffad9..c895b87 100644
 +        applicationId = "org.stypox.dicio.claude"
          minSdk = libs.versions.minSdk.get().toInt()
          targetSdk = libs.versions.targetSdk.get().toInt()
-         versionCode = 19
+-        versionCode = 19
++        versionCode = 20
+         versionName = "4.2"
+         testInstrumentationRunner = "org.stypox.dicio.CustomTestRunner"
+ 
 @@ -47,14 +47,13 @@ android {
      buildTypes {
          debug {
@@ -28,7 +32,7 @@ index f7ffad9..c895b87 100644
          }
          release {
 diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
-index c66e4da..27a010f 100644
+index c66e4da..fe437d9 100644
 --- a/app/src/main/AndroidManifest.xml
 +++ b/app/src/main/AndroidManifest.xml
 @@ -10,6 +10,8 @@
@@ -40,14 +44,89 @@ index c66e4da..27a010f 100644
      <uses-permission android:name="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" tools:ignore="ProtectedPermissions"/>
  
      <!-- required by the download manager for APIs < Q -->
+@@ -131,5 +133,18 @@
+             android:foregroundServiceType="microphone"
+             android:icon="@mipmap/ic_launcher"
+             android:label="@string/wake_service_label" />
++        <!-- Dicio per Claude: lets "Hey Claudio" open Claude from the background -->
++        <service
++            android:name=".io.wake.ClaudeLauncherService"
++            android:exported="true"
++            android:label="Dicio per Claude"
++            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
++            <intent-filter>
++                <action android:name="android.accessibilityservice.AccessibilityService" />
++            </intent-filter>
++            <meta-data
++                android:name="android.accessibilityservice"
++                android:resource="@xml/claude_launcher_service" />
++        </service>
+     </application>
+ </manifest>
+diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/ClaudeLauncherService.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/ClaudeLauncherService.kt
+new file mode 100644
+index 0000000..0997094
+--- /dev/null
++++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/ClaudeLauncherService.kt
+@@ -0,0 +1,48 @@
++package org.stypox.dicio.io.wake
++
++import android.accessibilityservice.AccessibilityService
++import android.content.Intent
++import android.util.Log
++import android.view.accessibility.AccessibilityEvent
++
++/**
++ * Dicio per Claude: an accessibility service whose only job is to allow opening Claude
++ * from the background when the wake word is heard (Android blocks background activity
++ * starts, but apps with a bound accessibility service are exempt). It reads nothing.
++ */
++class ClaudeLauncherService : AccessibilityService() {
++    override fun onServiceConnected() {
++        super.onServiceConnected()
++        instance = this
++    }
++
++    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
++
++    override fun onInterrupt() {}
++
++    override fun onDestroy() {
++        if (instance === this) instance = null
++        super.onDestroy()
++    }
++
++    override fun onUnbind(intent: Intent?): Boolean {
++        if (instance === this) instance = null
++        return super.onUnbind(intent)
++    }
++
++    companion object {
++        @Volatile
++        var instance: ClaudeLauncherService? = null
++
++        fun tryStart(intent: Intent): Boolean {
++            val service = instance ?: return false
++            return try {
++                service.startActivity(intent)
++                true
++            } catch (e: Exception) {
++                Log.w("ClaudeLauncherService", "Could not start Claude", e)
++                false
++            }
++        }
++    }
++}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
-index 81e1213..48b5cc2 100644
+index 81e1213..2390526 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
-@@ -211,6 +211,16 @@ class WakeService : Service() {
+@@ -210,7 +210,17 @@ class WakeService : Service() {
+                 val wakeWordDetected = wakeDevice.processFrame(audio)
                  if (wakeWordDetected && Instant.now() > nextWakeWordAllowed) {
                      nextWakeWordAllowed = Instant.now().plusMillis(WAKE_WORD_BACKOFF_MILLIS)
-                     onWakeWordDetected()
+-                    onWakeWordDetected()
++                    if (!onWakeWordDetected()) continue
 +                    // PATCH (Dicio per Claude): free the microphone so Claude can listen
 +                    ar.stop()
 +                    val resumeAt = Instant.now().plusMillis(MIC_PAUSE_AFTER_WAKE_MILLIS)
@@ -61,7 +140,7 @@ index 81e1213..48b5cc2 100644
                  }
  
                  lastHeard.set(Instant.now())
-@@ -221,59 +231,76 @@ class WakeService : Service() {
+@@ -221,59 +231,94 @@ class WakeService : Service() {
          }
      }
  
@@ -71,15 +150,13 @@ index 81e1213..48b5cc2 100644
 -        val intent = Intent(this, MainActivity::class.java)
 -        intent.setAction(ACTION_WAKE_WORD)
 -        intent.setFlags(FLAG_ACTIVITY_NEW_TASK)
--
--        // Start listening and pass STT events to the skill evaluator.
--        // Note that this works even if the MainActivity is opened later!
--        sttInputDevice.tryLoad(skillEvaluator::processInputEvent)
 +    /**
 +     * PATCH (Dicio per Claude): instead of opening Dicio, the wake word opens the Claude app
 +     * as voice assistant. Tries, in order: the assistant entry point (ACTION_ASSIST), the voice
 +     * command entry point, then the normal launcher activity of Claude.
 +     */
++    private var lastClaudeMode = ""
++
 +    private fun buildClaudeIntent(): Intent? {
 +        val candidates = listOf(
 +            Intent(Intent.ACTION_ASSIST).setPackage(CLAUDE_PACKAGE),
@@ -87,27 +164,39 @@ index 81e1213..48b5cc2 100644
 +        )
 +        for (candidate in candidates) {
 +            if (candidate.resolveActivity(packageManager) != null) {
++                lastClaudeMode = candidate.action ?: "?"
 +                return candidate.addFlags(FLAG_ACTIVITY_NEW_TASK)
 +            }
 +        }
++        lastClaudeMode = "LAUNCHER"
 +        return packageManager.getLaunchIntentForPackage(CLAUDE_PACKAGE)
 +            ?.addFlags(FLAG_ACTIVITY_NEW_TASK)
 +    }
  
+-        // Start listening and pass STT events to the skill evaluator.
+-        // Note that this works even if the MainActivity is opened later!
+-        sttInputDevice.tryLoad(skillEvaluator::processInputEvent)
++    /** Returns true if Claude was opened directly (so the microphone should be freed). */
++    private fun onWakeWordDetected(): Boolean {
++        Log.d(TAG, "Wake word detected, opening Claude")
+ 
 -        // Unload the STT after a while because it would be using RAM uselessly
 -        handler.removeCallbacks(releaseSttResourcesRunnable)
 -        handler.postDelayed(releaseSttResourcesRunnable, RELEASE_STT_RESOURCES_MILLIS)
-+    private fun onWakeWordDetected() {
-+        Log.d(TAG, "Wake word detected, opening Claude")
++        val intent = buildClaudeIntent()
++        if (intent == null) {
++            Log.w(TAG, "Claude app ($CLAUDE_PACKAGE) is not installed")
++            showToast("App Claude non trovata")
++            return false
++        }
  
 -        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || MainActivity.isInForeground > 0) {
 -            // start the activity directly on versions prior to Android 10,
 -            // or if the MainActivity is already running in the foreground
 -            startActivity(intent)
-+        val intent = buildClaudeIntent()
-+        if (intent == null) {
-+            Log.w(TAG, "Claude app ($CLAUDE_PACKAGE) is not installed")
-+            return
++        // 1. accessibility service (works from the background on every Android version)
++        if (ClaudeLauncherService.tryStart(intent)) {
++            return true
 +        }
  
 -        } else {
@@ -115,9 +204,18 @@ index 81e1213..48b5cc2 100644
 -            // so show a full-screen notification instead, which does actually result in starting
 -            // the activity from the background if the phone is off and Do Not Disturb is not active
 -            // Maybe we could also use the "Display over other apps" permission?
++        // 2. direct start (foreground, old Android, or "Display over other apps" granted)
 +        val canStartFromBackground = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
 +                MainActivity.isInForeground > 0 ||
 +                android.provider.Settings.canDrawOverlays(this)
++        if (canStartFromBackground) {
++            try {
++                startActivity(intent)
++                return true
++            } catch (e: Exception) {
++                Log.w(TAG, "Could not start Claude directly, falling back to notification", e)
++            }
++        }
  
 -            val channel = NotificationChannel(
 -                TRIGGERED_NOTIFICATION_CHANNEL_ID,
@@ -126,21 +224,6 @@ index 81e1213..48b5cc2 100644
 -            )
 -            channel.description = getString(R.string.wake_service_triggered_notification_summary)
 -            notificationManager.createNotificationChannel(channel)
-+        if (canStartFromBackground) {
-+            try {
-+                startActivity(intent)
-+                return
-+            } catch (e: Exception) {
-+                Log.w(TAG, "Could not start Claude directly, falling back to notification", e)
-+            }
-+        }
- 
--            val pendingIntent = PendingIntent.getActivity(
--                this,
--                0,
--                intent,
--                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
--            )
 +        // Android 10+ does not allow starting activities from the background without the
 +        // "Display over other apps" permission, so show a full-screen notification instead.
 +        val channel = NotificationChannel(
@@ -158,6 +241,24 @@ index 81e1213..48b5cc2 100644
 +            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
 +        )
  
+-            val pendingIntent = PendingIntent.getActivity(
+-                this,
+-                0,
+-                intent,
+-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+-            )
++        val notification = NotificationCompat.Builder(this, TRIGGERED_NOTIFICATION_CHANNEL_ID)
++            .setSmallIcon(R.drawable.ic_hearing_white)
++            .setContentTitle("Hey Claudio")
++            .setContentText("Tocca per aprire Claude (" + lastClaudeMode.substringAfterLast('.') +
++                    ", sopra altre app: " + (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
++                        android.provider.Settings.canDrawOverlays(this) else true) + ")")
++            .setPriority(NotificationCompat.PRIORITY_HIGH)
++            .setContentIntent(pendingIntent)
++            .setAutoCancel(true)
++            .setFullScreenIntent(pendingIntent, true)
++            .build()
+ 
 -            val notification = NotificationCompat.Builder(this, TRIGGERED_NOTIFICATION_CHANNEL_ID)
 -                .setSmallIcon(R.drawable.ic_hearing_white)
 -                .setContentTitle(getString(R.string.wake_service_triggered_notification))
@@ -166,25 +267,20 @@ index 81e1213..48b5cc2 100644
 -                .setPriority(NotificationCompat.PRIORITY_HIGH)
 -                .setFullScreenIntent(pendingIntent, true)
 -                .build()
-+        val notification = NotificationCompat.Builder(this, TRIGGERED_NOTIFICATION_CHANNEL_ID)
-+            .setSmallIcon(R.drawable.ic_hearing_white)
-+            .setContentTitle("Hey Claudio")
-+            .setContentText("Tocca per aprire Claude")
-+            .setPriority(NotificationCompat.PRIORITY_HIGH)
-+            .setContentIntent(pendingIntent)
-+            .setAutoCancel(true)
-+            .setFullScreenIntent(pendingIntent, true)
-+            .build()
++        notificationManager.cancel(TRIGGERED_NOTIFICATION_ID)
++        notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
++        return false
++    }
  
 -            notificationManager.cancel(TRIGGERED_NOTIFICATION_ID)
 -            notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
 -        }
-+        notificationManager.cancel(TRIGGERED_NOTIFICATION_ID)
-+        notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
++    private fun showToast(text: String) {
++        handler.post { android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_SHORT).show() }
      }
  
      companion object {
-@@ -364,6 +391,8 @@ class WakeService : Service() {
+@@ -364,6 +409,8 @@ class WakeService : Service() {
          private const val START_NOTIFICATION_ID = 48019274
          private const val TRIGGERED_NOTIFICATION_ID = 601398647
          private const val WAKE_WORD_BACKOFF_MILLIS = 4000L
@@ -216,7 +312,7 @@ index 9027a73..c720845 100644
      private val allModelFiles =
          // wakeFile is not needed if we want to use the userWakeFile instead
 diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
-index b5e8c88..ba0949c 100644
+index b5e8c88..9eca347 100644
 --- a/app/src/main/res/values/strings.xml
 +++ b/app/src/main/res/values/strings.xml
 @@ -1,6 +1,6 @@
@@ -227,3 +323,22 @@ index b5e8c88..ba0949c 100644
      <string name="drawer_open">Open navigation drawer</string>
      <string name="drawer_close">Close navigation drawer</string>
      <string name="drawer_header_subtitle">May I help you?</string>
+@@ -281,4 +281,5 @@
+     <string name="about_privacy_title">Privacy policy</string>
+     <string name="about_privacy_description">Dicio connects to external services only when a skill is expected to do so, or to download machine learning models during setup. All speech processing is performed locally on-device, and most skills can be used offline.</string>
+     <string name="about_privacy_link" translatable="false">https://stypox.org/dicio-privacy-policy.html</string>
++    <string name="claude_launcher_service_description" translatable="false">Serve solo per aprire Claude quando dici \"Hey Claudio\". Non legge il contenuto dello schermo.</string>
+ </resources>
+diff --git a/app/src/main/res/xml/claude_launcher_service.xml b/app/src/main/res/xml/claude_launcher_service.xml
+new file mode 100644
+index 0000000..2520b53
+--- /dev/null
++++ b/app/src/main/res/xml/claude_launcher_service.xml
+@@ -0,0 +1,7 @@
++<?xml version="1.0" encoding="utf-8"?>
++<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
++    android:accessibilityEventTypes="typeWindowStateChanged"
++    android:accessibilityFeedbackType="feedbackGeneric"
++    android:canRetrieveWindowContent="false"
++    android:notificationTimeout="1000"
++    android:description="@string/claude_launcher_service_description" />
