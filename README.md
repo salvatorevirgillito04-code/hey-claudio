@@ -1,14 +1,19 @@
 # Hey Claudio
 
-Parola di attivazione personalizzata "Hey Claudio" per l'assistente vocale Dicio su Android, usata per aprire Claude.
+Parola di attivazione personalizzata **"Hey Claudio"** per l'assistente vocale [Dicio](https://github.com/Stypox/dicio-android) su Android, usata per aprire Claude a voce.
 
-## Come si usa
+## File
 
-1. Apri il notebook su Colab:
-   https://colab.research.google.com/github/salvatorevirgillito04-code/hey-claudio/blob/main/train_wakeword.ipynb
-2. Runtime → Cambia tipo di runtime → T4 GPU.
-3. Runtime → Esegui tutte (circa 2,5 ore su Colab gratuito, tenere lo schermo acceso).
-4. Alla fine viene scaricato `hey_claudio.onnx`: va convertito in `.tflite` e importato in Dicio
-   (Impostazioni → Metodi di input e output → Importa parola di attivazione personalizzata).
+- `hey_claudio.tflite` — **il file da importare in Dicio** (Impostazioni → Metodi di input e output → Importa parola di attivazione personalizzata). Sensibilità già tarata sulla soglia fissa di Dicio (0,8).
+- `hey_claudio.onnx` — lo stesso modello in formato ONNX (uscita grezza, soglia consigliata 0,7).
+- `train_wakeword.ipynb` — notebook Colab usato come base per l'addestramento.
 
-Notebook basato su [openwakeword-colab-2026](https://github.com/alfiedennen/openwakeword-colab-2026) (licenza MIT).
+## Risultati dei test (voci sintetiche)
+
+- "Hey Claudio" riconosciuto nel 99% dei clip di prova.
+- Frasi simili scambiate per la parola: 3%.
+- Musica: 1 attivazione per errore su 100 brani da 30 secondi.
+
+Con la voce vera i risultati possono essere un po' diversi: se si attiva poco o troppo, il modello si può riaddestrare cambiando la sensibilità.
+
+Addestramento basato su [openWakeWord](https://github.com/dscripka/openWakeWord) e [openwakeword-colab-2026](https://github.com/alfiedennen/openwakeword-colab-2026) (licenza MIT).
