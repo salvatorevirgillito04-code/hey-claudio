@@ -11,7 +11,7 @@ Salvo (lavora solo da telefono Oppo Reno 12 FS, Android, nessun computer) vuole 
 
 ## Stato (2 nov 2026)
 - La parola viene riconosciuta sul telefono, ma con la v3 Android/ColorOS bloccava l'apertura di Claude da background (solo notifica).
-- Una versione con servizio di Accessibilità dava "App non installata" su ColorOS: tolta.
+- Una versione con servizio di Accessibilità dava "App non installata" su ColorOS: tolta. Probabile vera causa: firma diversa da quella già installata (ColorOS dice solo "App non installata" quando c'è un conflitto di firma). La v4 (firma nuova) dava lo stesso messaggio: l'APK è valido (verificato con apksigner, zip integro), quindi va rimossa ogni copia di `org.stypox.dicio.claude` (anche in Clonazione app / Spazio privato / altri utenti) prima di installare.
 - v4 (da provare sul telefono) usa insieme due strade, perché il sistema può bloccarne una in silenzio:
   1. avvio diretto grazie a "Mostra sopra altre app", con una finestrella sovrapposta invisibile 1x1 (da Android 15 il permesso vale solo se c'è una finestra sovrapposta visibile);
   2. notifica a schermo intero (USE_FULL_SCREEN_INTENT, da Android 14 va concessa a mano), che a schermo spento il sistema apre da solo.
