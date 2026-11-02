@@ -20,6 +20,7 @@ Salvo (lavora solo da telefono Oppo Reno 12 FS, Android, nessun computer) vuole 
 - Salvo vuole il pannello assistente di Claude ("Parliamo, Salvo", quello del tasto di accensione), anche a schermo spento e SENZA sbloccare.
 - Prove v6 sul telefono: schermo acceso e sbloccato → pannello di Claude, perfetto. Schermata di blocco (o schermo spento: si accende) → è Claude stesso a dire "sblocca per accedere a Claude", e dopo lo sblocco non si apriva niente. Il microfono di Dicio si fermava chiudendo l'app (ColorOS uccide l'app tolta dalle recenti).
 - v7: se il telefono è bloccato, dopo launchAssist aspetta lo sblocco (ACTION_USER_PRESENT, fino a 60 s, microfono di Dicio in pausa nel frattempo) e richiama launchAssist; MainActivity ha excludeFromRecents, così non si può chiudere scorrendo dalle recenti. Da verificare.
+- Verificato da Salvo: né il pannello vocale (ingranaggio), né le impostazioni dell'app Claude, né Impostazioni → App predefinite → Assistente digitale hanno un'opzione per la schermata di blocco.
 - Aprire Claude SENZA sbloccare non dipende da noi: è l'app Claude che sulla schermata di blocco chiede lo sblocco. Alternative: sblocco col volto, Smart Lock/Extend Unlock, oppure blocco schermo "Nessuno"/"Scorri".
 - Con blocco sicuro (PIN/impronta) serve comunque lo sblocco: Claude non può mostrarsi sopra la schermata di blocco. Lo sblocco col volto lo rende "senza mani".
 - Dopo l'apertura di Claude il microfono di Dicio si ferma 20 s per lasciarlo a Claude.
