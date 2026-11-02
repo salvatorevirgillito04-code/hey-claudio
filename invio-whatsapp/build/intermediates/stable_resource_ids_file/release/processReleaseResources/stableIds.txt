@@ -1,0 +1,4 @@
+org.stypox.dicio.claude.invio:xml/accessibility_service = 0x7f020000
+org.stypox.dicio.claude.invio:string/service_name = 0x7f010002
+org.stypox.dicio.claude.invio:string/service_description = 0x7f010001
+org.stypox.dicio.claude.invio:string/app_name = 0x7f010000

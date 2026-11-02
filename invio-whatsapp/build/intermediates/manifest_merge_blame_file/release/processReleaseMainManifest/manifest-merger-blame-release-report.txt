@@ -1,0 +1,101 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="org.stypox.dicio.claude.invio"
+4    android:versionCode="105"
+5    android:versionName="1.105" >
+6
+7    <uses-sdk
+8        android:minSdkVersion="26"
+9        android:targetSdkVersion="35" />
+10
+11    <!--
+12         Same permission as in Dicio per Claude: only apps signed with the same key can ask this
+13         app to press "Invia"
+14    -->
+15    <permission
+15-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:6:5-8:47
+16        android:name="org.stypox.dicio.claude.permission.WHATSAPP_SEND"
+16-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:7:9-72
+17        android:protectionLevel="signature" />
+17-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:8:9-44
+18
+19    <queries>
+19-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:10:5-13:15
+20        <package android:name="com.whatsapp" />
+20-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:11:9-48
+20-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:11:18-45
+21        <package android:name="com.whatsapp.w4b" />
+21-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:12:9-52
+21-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:12:18-49
+22    </queries>
+23
+24    <application
+24-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:15:5-50:19
+25        android:allowBackup="false"
+25-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:18:9-36
+26        android:extractNativeLibs="false"
+27        android:icon="@android:drawable/ic_menu_send"
+27-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:17:9-54
+28        android:label="@string/app_name" >
+28-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:16:9-41
+29        <activity
+29-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:20:9-27:20
+30            android:name="org.stypox.dicio.claude.invio.SetupActivity"
+30-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:21:13-42
+31            android:exported="true" >
+31-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:22:13-36
+32            <intent-filter>
+32-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:23:13-26:29
+33                <action android:name="android.intent.action.MAIN" />
+33-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:24:17-69
+33-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:24:25-66
+34
+35                <category android:name="android.intent.category.LAUNCHER" />
+35-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:25:17-77
+35-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:25:27-74
+36            </intent-filter>
+37        </activity>
+38
+39        <receiver
+39-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:29:9-36:20
+40            android:name="org.stypox.dicio.claude.invio.SendRequestReceiver"
+40-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:30:13-48
+41            android:exported="true"
+41-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:31:13-36
+42            android:permission="org.stypox.dicio.claude.permission.WHATSAPP_SEND" >
+42-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:32:13-82
+43            <intent-filter>
+43-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:33:13-35:29
+44                <action android:name="org.stypox.dicio.claude.invio.SEND_NEXT" />
+44-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:34:17-82
+44-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:34:25-79
+45            </intent-filter>
+46        </receiver>
+47
+48        <service
+48-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:38:9-49:19
+49            android:name="org.stypox.dicio.claude.invio.WhatsAppSendService"
+49-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:39:13-48
+50            android:exported="false"
+50-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:40:13-37
+51            android:label="@string/service_name"
+51-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:41:13-49
+52            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE" >
+52-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:42:13-79
+53            <intent-filter>
+53-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:43:13-45:29
+54                <action android:name="android.accessibilityservice.AccessibilityService" />
+54-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:44:17-92
+54-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:44:25-89
+55            </intent-filter>
+56
+57            <meta-data
+57-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:46:13-48:65
+58                android:name="android.accessibilityservice"
+58-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:47:17-60
+59                android:resource="@xml/accessibility_service" />
+59-->/home/user/hey-claudio/invio-whatsapp/src/main/AndroidManifest.xml:48:17-62
+60        </service>
+61    </application>
+62
+63</manifest>
