@@ -1,5 +1,5 @@
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index f7ffad93..cd8dd6c3 100644
+index f7ffad93..464cf0a1 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
 @@ -30,10 +30,10 @@ android {
@@ -11,7 +11,7 @@ index f7ffad93..cd8dd6c3 100644
          minSdk = libs.versions.minSdk.get().toInt()
          targetSdk = libs.versions.targetSdk.get().toInt()
 -        versionCode = 19
-+        versionCode = 31
++        versionCode = 32
          versionName = "4.2"
          testInstrumentationRunner = "org.stypox.dicio.CustomTestRunner"
  
@@ -42,10 +42,10 @@ index f7ffad93..cd8dd6c3 100644
      coreLibraryDesugaring(libs.desugar.jdk.libs)
  
 diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
-index c66e4da0..9a8e1b52 100644
+index c66e4da0..986b418b 100644
 --- a/app/src/main/AndroidManifest.xml
 +++ b/app/src/main/AndroidManifest.xml
-@@ -10,7 +10,17 @@
+@@ -10,7 +10,30 @@
      <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
      <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
      <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
@@ -57,6 +57,19 @@ index c66e4da0..9a8e1b52 100644
 +    <uses-permission android:name="android.permission.VIBRATE" />
 +    <!-- Dicio per Claude: turn on the speakerphone for "chiama X in vivavoce" -->
 +    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
++    <!-- Dicio per Claude: alarms by voice -->
++    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
++    <!-- Dicio per Claude: only apps signed with the same key (the "Invio WhatsApp" companion)
++         can use this, to press "Invia" in WhatsApp after a voice command -->
++    <permission
++        android:name="org.stypox.dicio.claude.permission.WHATSAPP_SEND"
++        android:protectionLevel="signature" />
++    <uses-permission android:name="org.stypox.dicio.claude.permission.WHATSAPP_SEND" />
++    <queries>
++        <package android:name="org.stypox.dicio.claude.invio" />
++        <package android:name="com.whatsapp" />
++        <package android:name="com.google.android.apps.maps" />
++    </queries>
 +    <!-- Dicio per Claude: restart the wake word service quickly if the app gets killed -->
 +    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 +    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
@@ -64,7 +77,7 @@ index c66e4da0..9a8e1b52 100644
  
      <!-- required by the download manager for APIs < Q -->
      <uses-permission
-@@ -42,6 +52,7 @@
+@@ -42,6 +65,7 @@
          <activity
              android:name=".MainActivity"
              android:exported="true"
@@ -72,7 +85,7 @@ index c66e4da0..9a8e1b52 100644
              android:windowSoftInputMode="adjustResize"
              android:launchMode="singleTop"
              android:showOnLockScreen="true">
-@@ -66,6 +77,33 @@
+@@ -66,6 +90,33 @@
                  android:resource="@xml/shortcuts" />
          </activity>
  
@@ -106,7 +119,7 @@ index c66e4da0..9a8e1b52 100644
          <activity
              android:name=".error.ErrorActivity"
              android:exported="false" />
-@@ -102,16 +140,6 @@
+@@ -102,16 +153,6 @@
                  android:resource="@xml/stt_service_metadata" />
          </service>
  
@@ -223,6 +236,115 @@ index 4a8b8c31..b8543f2b 100644
          var isCreated: Int = 0
              private set
  
+diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/Alarms.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/Alarms.kt
+new file mode 100644
+index 00000000..51142392
+--- /dev/null
++++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/Alarms.kt
+@@ -0,0 +1,103 @@
++package org.stypox.dicio.io.wake
++
++import java.time.LocalTime
++
++/**
++ * PATCH (Dicio per Claude): understands Italian alarm requests as transcribed by the offline STT
++ * (numbers may be digits or words), e.g. "metti una sveglia alle sette e mezza",
++ * "svegliami alle 6:45", "sveglia alle otto di sera", "sveglia tra venti minuti".
++ */
++object Alarms {
++    data class Alarm(val hour: Int, val minute: Int, val label: String?)
++
++    private val START = Regex(
++        """^(?:(?:metti|mettimi|imposta|impostami|crea|fissa|punta)\s+(?:una|la)?\s*sveglia|sveglia|svegliami|sveglieri[ae])\b\s*(.*)$"""
++    )
++
++    private val UNITS = mapOf(
++        "zero" to 0, "un" to 1, "uno" to 1, "una" to 1, "l'una" to 1, "due" to 2, "tre" to 3,
++        "quattro" to 4, "cinque" to 5, "sei" to 6, "sette" to 7, "otto" to 8, "nove" to 9,
++        "dieci" to 10, "undici" to 11, "dodici" to 12, "tredici" to 13, "quattordici" to 14,
++        "quindici" to 15, "sedici" to 16, "diciassette" to 17, "diciotto" to 18,
++        "diciannove" to 19, "mezzogiorno" to 12, "mezzanotte" to 0,
++    )
++    private val TENS = listOf("venti" to 20, "trenta" to 30, "quaranta" to 40, "cinquanta" to 50)
++    private val UNIT_SUFFIX = mapOf(
++        "" to 0, "uno" to 1, "un" to 1, "due" to 2, "tre" to 3, "tré" to 3, "quattro" to 4,
++        "cinque" to 5, "sei" to 6, "sette" to 7, "otto" to 8, "nove" to 9,
++    )
++
++    /** Parses "7", "07", "sette", "ventitré", "trentacinque"... */
++    fun parseNumber(word: String): Int? {
++        word.toIntOrNull()?.let { return it }
++        UNITS[word]?.let { return it }
++        for ((tensWord, tens) in TENS) {
++            // "ventuno"/"ventotto": the final vowel of the tens is dropped
++            for (prefix in listOf(tensWord, tensWord.dropLast(1))) {
++                if (word.startsWith(prefix)) {
++                    UNIT_SUFFIX[word.removePrefix(prefix)]?.let { return tens + it }
++                }
++            }
++        }
++        return null
++    }
++
++    fun parse(text: String): Alarm? {
++        val rest = START.find(text.trim())?.groupValues?.get(1)?.trim() ?: return null
++        val words = rest.replace(":", " ").replace(".", " ").split(Regex("""\s+"""))
++            .filter { it.isNotEmpty() }
++
++        // "tra venti minuti" / "fra un'ora" / "tra due ore e mezza"
++        val traIndex = words.indexOfFirst { it == "tra" || it == "fra" }
++        if (traIndex >= 0) {
++            var minutes = 0
++            var i = traIndex + 1
++            while (i < words.size) {
++                val w = words[i].removePrefix("un'")
++                val n = if (words[i].startsWith("un'")) 1 else parseNumber(w)
++                val unitWord = if (words[i].startsWith("un'")) w else words.getOrNull(i + 1) ?: ""
++                if (n != null && unitWord.startsWith("or")) { minutes += n * 60; i += if (words[i].startsWith("un'")) 1 else 2; continue }
++                if (n != null && unitWord.startsWith("minut")) { minutes += n; i += 2; continue }
++                if (w == "mezza" || w == "mezzo") { minutes += 30; i++; continue }
++                if (w == "e") { i++; continue }
++                break
++            }
++            if (minutes > 0) {
++                val t = LocalTime.now().plusMinutes(minutes.toLong())
++                return Alarm(t.hour, t.minute, null)
++            }
++        }
++
++        // "alle sette e mezza (di sera)", "per le 6 45", "alle 7"
++        var i = words.indexOfFirst { it == "alle" || it == "all'una" || it == "per" || it == "a" }
++        if (words.getOrNull(i) == "per" && words.getOrNull(i + 1) == "le") i++
++        val hourIndex = if (i >= 0) i + 1 else 0
++        val hourWord = if (words.getOrNull(i) == "all'una") "una" else words.getOrNull(hourIndex)
++        var hour = hourWord?.let { parseNumber(it) } ?: return null
++        if (hour > 24) return null
++        var minute = 0
++        var j = if (words.getOrNull(i) == "all'una") i + 1 else hourIndex + 1
++        if (words.getOrNull(j) == "e") j++
++        when (val w = words.getOrNull(j)) {
++            "mezza", "mezzo", "trenta" -> { minute = 30; j++ }
++            "un" -> if (words.getOrNull(j + 1) == "quarto") { minute = 15; j += 2 }
++            "meno" -> {
++                if (words.getOrNull(j + 1) == "un" && words.getOrNull(j + 2) == "quarto") {
++                    minute = 45; hour = (hour + 23) % 24; j += 3
++                } else {
++                    parseNumber(words.getOrNull(j + 1) ?: "")?.let {
++                        minute = (60 - it) % 60; hour = (hour + 23) % 24; j += 2
++                    }
++                }
++            }
++            null -> {}
++            else -> parseNumber(w)?.let { if (it < 60) { minute = it; j++ } }
++        }
++        if (words.getOrNull(j) == "minuti") j++
++        val tail = words.drop(j).joinToString(" ")
++        if (hour < 12 && (tail.contains("sera") || tail.contains("pomeriggio"))) hour += 12
++        if (hour == 12 && (tail.contains("notte"))) hour = 0
++        if (hour == 24) hour = 0
++        return Alarm(hour, minute, null)
++    }
++}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/BootBroadcastReceiver.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/BootBroadcastReceiver.kt
 index c4f3e565..4f62184d 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/io/wake/BootBroadcastReceiver.kt
@@ -451,12 +573,32 @@ index 00000000..0d7939a9
 +            buildClaudeIntent(context) != null
 +    }
 +}
+diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/Navigation.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/Navigation.kt
+new file mode 100644
+index 00000000..ce9fbdab
+--- /dev/null
++++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/Navigation.kt
+@@ -0,0 +1,14 @@
++package org.stypox.dicio.io.wake
++
++/**
++ * PATCH (Dicio per Claude): Italian navigation requests, e.g. "portami a Roma",
++ * "naviga verso via Roma 10 Milano", "indicazioni per la stazione", "andiamo al lavoro".
++ */
++object Navigation {
++    private val START = Regex(
++        """^(?:portami|accompagnami|naviga(?:zione)?|avvia\s+(?:la\s+)?navigazione|andiamo|indicazioni(?:\s+stradali)?|percorso|strada)\s+(?:(?:verso|fino|per)\s+)?(?:all'|(?:alla|allo|alle|agli|ai|al|ad|a|in|dalla|dal|da)\s+)?(.+)$"""
++    )
++
++    fun parse(text: String): String? =
++        START.find(text.trim())?.groupValues?.get(1)?.trim()?.takeIf { it.isNotEmpty() }
++}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/PhoneActions.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/PhoneActions.kt
 new file mode 100644
-index 00000000..14f84fb9
+index 00000000..2f307a75
 --- /dev/null
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/PhoneActions.kt
-@@ -0,0 +1,168 @@
+@@ -0,0 +1,237 @@
 +package org.stypox.dicio.io.wake
 +
 +import android.Manifest
@@ -464,6 +606,7 @@ index 00000000..14f84fb9
 +import android.content.Intent
 +import android.content.pm.PackageManager
 +import android.net.Uri
++import android.provider.AlarmClock
 +import android.provider.ContactsContract
 +import android.telephony.PhoneNumberUtils
 +import android.util.Log
@@ -480,6 +623,10 @@ index 00000000..14f84fb9
 +object PhoneActions {
 +    private const val TAG = "PhoneActions"
 +    const val WHATSAPP = "com.whatsapp"
++    /** Companion app with the accessibility service that presses "Invia" in WhatsApp. */
++    const val SENDER_PACKAGE = "org.stypox.dicio.claude.invio"
++    const val SENDER_ACTION = "org.stypox.dicio.claude.invio.SEND_NEXT"
++    const val SENDER_PERMISSION = "org.stypox.dicio.claude.permission.WHATSAPP_SEND"
 +    private const val WHATSAPP_VOICE = "vnd.android.cursor.item/vnd.com.whatsapp.voip.call"
 +    private const val WHATSAPP_VIDEO = "vnd.android.cursor.item/vnd.com.whatsapp.video.call"
 +
@@ -492,7 +639,7 @@ index 00000000..14f84fb9
 +
 +    private val WHATSAPP_WORDS = Regex("""\s*\b(?:su|con|via|tramite|in|di)\s+(?:whatsapp|whats\s*app|uozzap|uotsap)\b""")
 +    private val MESSAGE_START = Regex(
-+        """^(?:scrivi|scrivere|manda|mandare|invia|inviare|mandami|scrivimi)(?:\s+(?:un|il)?\s*(?:messaggio|messaggino|whatsapp|vocale))?\s+(?:a|ad|al|alla|allo)\s+(.+)$"""
++        """^(?:scrivi|scrivere|manda|mandare|invia|inviare|mandami|scrivimi)(?:\s+(?:un|il|questo|questa|sto)?\s*(?:messaggio|messaggino|whatsapp|vocale))?\s+(?:a|ad|al|alla|allo)\s+(.+)$"""
 +    )
 +    private val TEXT_SEPARATOR = Regex(
 +        """\s+(?:che\s+dice|dicendo(?:gli|le)?|con\s+scritto|scrivendo(?:gli|le)?|con\s+il\s+testo|il\s+messaggio|messaggio)\s+"""
@@ -500,8 +647,13 @@ index 00000000..14f84fb9
 +    private val VIDEO_CALL = Regex("""^(?:videochiama|videochiamata\s+(?:a|ad|al|alla)|fai\s+una\s+videochiamata\s+(?:a|ad|al|alla))\s+(.+)$""")
 +    private val CALL_START = Regex("""^(?:chiama|chiamami|telefona(?:\s+(?:a|ad|al|alla))?)\s+(.+)$""")
 +
++    private val AUTO_SEND_SUFFIX = Regex("""\s+(?:e\s+)?(?:invia(?:lo|la)?|mandalo|mandala|spedisci(?:lo)?|invio)\s*$""")
++
 +    fun handle(context: Context, rawText: String): Result {
 +        val text = rawText.lowercase().trim()
++
++        Alarms.parse(text)?.let { return setAlarm(context, it) }
++        Navigation.parse(text)?.let { return navigate(context, it) }
 +        val mentionsWhatsapp = text.contains("whatsapp") || text.contains("whats app")
 +
 +        VIDEO_CALL.find(text)?.let {
@@ -517,7 +669,10 @@ index 00000000..14f84fb9
 +        }
 +        val withoutWhatsapp = WHATSAPP_WORDS.replace(text, " ").replace(Regex("""\s+"""), " ").trim()
 +        MESSAGE_START.find(withoutWhatsapp)?.let {
-+            return whatsappMessage(context, it.groupValues[1].trim())
++            var rest = it.groupValues[1].trim()
++            val autoSend = AUTO_SEND_SUFFIX.containsMatchIn(rest)
++            rest = AUTO_SEND_SUFFIX.replace(rest, "").trim()
++            return whatsappMessage(context, rest, autoSend)
 +        }
 +        return Result.NotHandled
 +    }
@@ -558,7 +713,14 @@ index 00000000..14f84fb9
 +        return Pair(chosen.second, message.trim())
 +    }
 +
-+    private fun whatsappMessage(context: Context, rest: String): Result {
++    private fun isSenderInstalled(context: Context) = try {
++        context.packageManager.getPackageInfo(SENDER_PACKAGE, 0)
++        true
++    } catch (e: Exception) {
++        false
++    }
++
++    private fun whatsappMessage(context: Context, rest: String, autoSend: Boolean): Result {
 +        if (!hasContactsPermission(context)) {
 +            return Result.Done("Per scrivere messaggi devo poter leggere i contatti")
 +        }
@@ -574,16 +736,65 @@ index 00000000..14f84fb9
 +        if (message.isNotEmpty()) {
 +            url += "&text=" + URLEncoder.encode(message, "UTF-8").replace("+", "%20")
 +        }
++        var speech: String? = null
++        if (autoSend && message.isNotEmpty()) {
++            if (isSenderInstalled(context)) {
++                // the companion app will press "Invia" as soon as the chat is open
++                context.sendBroadcast(
++                    Intent(SENDER_ACTION).setPackage(SENDER_PACKAGE),
++                    SENDER_PERMISSION
++                )
++            } else {
++                speech = "Per inviare da solo serve l'app Invio WhatsApp"
++            }
++        }
 +        return try {
 +            context.startActivity(
 +                Intent(Intent.ACTION_VIEW, Uri.parse(url))
 +                    .setPackage(WHATSAPP)
 +                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 +            )
-+            Result.Done(null)
++            Result.Done(speech)
 +        } catch (e: Exception) {
 +            Log.w(TAG, "Could not open WhatsApp", e)
 +            Result.Done("Non riesco ad aprire WhatsApp")
++        }
++    }
++
++    private fun setAlarm(context: Context, alarm: Alarms.Alarm): Result {
++        val intent = Intent(AlarmClock.ACTION_SET_ALARM)
++            .putExtra(AlarmClock.EXTRA_HOUR, alarm.hour)
++            .putExtra(AlarmClock.EXTRA_MINUTES, alarm.minute)
++            .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
++            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++        if (alarm.label != null) intent.putExtra(AlarmClock.EXTRA_MESSAGE, alarm.label)
++        return try {
++            context.startActivity(intent)
++            Result.Done("Sveglia impostata alle ${alarm.hour} e ${"%02d".format(alarm.minute)}")
++        } catch (e: Exception) {
++            Log.w(TAG, "Could not set alarm", e)
++            Result.Done("Non riesco a impostare la sveglia")
++        }
++    }
++
++    private fun navigate(context: Context, destination: String): Result {
++        val maps = Intent(Intent.ACTION_VIEW, Uri.parse("google.navigation:q=" + Uri.encode(destination)))
++            .setPackage("com.google.android.apps.maps")
++            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++        return try {
++            context.startActivity(maps)
++            Result.Done(null)
++        } catch (e: Exception) {
++            try {
++                context.startActivity(
++                    Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=" + Uri.encode(destination)))
++                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++                )
++                Result.Done(null)
++            } catch (e2: Exception) {
++                Log.w(TAG, "Could not start navigation", e2)
++                Result.Done("Non ho trovato un'app per la navigazione")
++            }
 +        }
 +    }
 +
@@ -757,7 +968,7 @@ index 00000000..c578f293
 +    }
 +}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
-index 81e12139..1ae41c95 100644
+index 81e12139..1d2ab3ff 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 @@ -35,6 +35,7 @@ import org.stypox.dicio.R
@@ -932,10 +1143,7 @@ index 81e12139..1ae41c95 100644
 -        intent.setFlags(FLAG_ACTIVITY_NEW_TASK)
 +        vibrateHeard()
 +        val wasScreenOff = wakeUpScreen()
- 
--        // Start listening and pass STT events to the skill evaluator.
--        // Note that this works even if the MainActivity is opened later!
--        sttInputDevice.tryLoad(skillEvaluator::processInputEvent)
++
 +        // PATCH (Dicio per Claude): Claude always opens right away (voice assistant), while Dicio
 +        // listens to the same sentence: if it is a phone call request ("chiama Mario in
 +        // vivavoce") Dicio's telephone skill places the call, which comes on top of Claude.
@@ -944,16 +1152,12 @@ index 81e12139..1ae41c95 100644
 +        scope.launch { openClaude(wasScreenOff) }
 +        return true
 +    }
- 
--        // Unload the STT after a while because it would be using RAM uselessly
--        handler.removeCallbacks(releaseSttResourcesRunnable)
--        handler.postDelayed(releaseSttResourcesRunnable, RELEASE_STT_RESOURCES_MILLIS)
++
 +    private var commandSession = 0
  
--        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || MainActivity.isInForeground > 0) {
--            // start the activity directly on versions prior to Android 10,
--            // or if the MainActivity is already running in the foreground
--            startActivity(intent)
+-        // Start listening and pass STT events to the skill evaluator.
+-        // Note that this works even if the MainActivity is opened later!
+-        sttInputDevice.tryLoad(skillEvaluator::processInputEvent)
 +    /** Must be called on the main thread. */
 +    private fun listenForCommand() {
 +        val session = ++commandSession
@@ -961,11 +1165,18 @@ index 81e12139..1ae41c95 100644
 +        var heardSomething = false
 +        val timeouts = mutableListOf<Runnable>()
  
+-        // Unload the STT after a while because it would be using RAM uselessly
+-        handler.removeCallbacks(releaseSttResourcesRunnable)
+-        handler.postDelayed(releaseSttResourcesRunnable, RELEASE_STT_RESOURCES_MILLIS)
 +        fun clearTimeouts() {
 +            timeouts.forEach { handler.removeCallbacks(it) }
 +            timeouts.clear()
 +        }
-+
+ 
+-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || MainActivity.isInForeground > 0) {
+-            // start the activity directly on versions prior to Android 10,
+-            // or if the MainActivity is already running in the foreground
+-            startActivity(intent)
 +        // not a phone call: stop listening, so that the microphone is all Claude's
 +        fun decideClaude(reason: String) {
 +            if (decided || session != commandSession) return
@@ -978,7 +1189,7 @@ index 81e12139..1ae41c95 100644
 +                Log.w(TAG, "Could not stop STT", e)
 +            }
 +        }
-+
+ 
 +        val listener: (InputEvent) -> Unit = { event ->
 +            handler.post {
 +                if (decided || session != commandSession) return@post
@@ -1241,7 +1452,9 @@ index 81e12139..1ae41c95 100644
 +        }
 +        unlockReceiver = null
 +    }
-+
+ 
+-            notificationManager.cancel(TRIGGERED_NOTIFICATION_ID)
+-            notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
 +    /** Returns true if the screen was off (and has been turned on). */
 +    @Suppress("DEPRECATION")
 +    private fun wakeUpScreen(): Boolean {
@@ -1281,20 +1494,18 @@ index 81e12139..1ae41c95 100644
 +        } catch (e: Exception) {
 +            Log.w(TAG, "Could not show overlay", e)
 +            null
-+        }
-+    }
+         }
+     }
  
--            notificationManager.cancel(TRIGGERED_NOTIFICATION_ID)
--            notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
 +    private fun removeOverlay(view: android.view.View?) {
 +        if (view == null) return
 +        try {
 +            getSystemService(this, android.view.WindowManager::class.java)?.removeView(view)
 +        } catch (e: Exception) {
 +            Log.w(TAG, "Could not remove overlay", e)
-         }
-     }
- 
++        }
++    }
++
 +    private fun showFullScreenNotification(intent: Intent) {
 +        val channel = NotificationChannel(
 +            TRIGGERED_NOTIFICATION_CHANNEL_ID,
@@ -1357,7 +1568,7 @@ index 81e12139..1ae41c95 100644
              val intent = Intent(context, WakeService::class.java)
              ContextCompat.startForegroundService(context, intent)
          }
-@@ -362,8 +789,55 @@ class WakeService : Service() {
+@@ -362,8 +789,57 @@ class WakeService : Service() {
              "org.stypox.dicio.io.wake.WakeService.TRIGGERED"
          private const val FOREGROUND_NOTIFICATION_ID = 19803672
          private const val START_NOTIFICATION_ID = 48019274
@@ -1400,6 +1611,8 @@ index 81e12139..1ae41c95 100644
 +            "accendi", "accendimi", "spegni", "spegnimi", "attiva", "disattiva",
 +            "imposta", "timer", "metti", "riproduci", "riprendi", "pausa", "stoppa",
 +            "canzone", "traccia",
++            "sveglia", "svegliami", "mettimi", "impostami", "crea", "fissa",
++            "portami", "accompagnami", "naviga", "navigazione", "andiamo", "indicazioni", "percorso",
 +        )
 +
 +        fun isActionStart(words: List<String>): Boolean {

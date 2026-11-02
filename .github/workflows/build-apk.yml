@@ -9,6 +9,7 @@ on:
     paths:
       - 'dicio-per-claude/**'
       - 'hey_claudio.tflite'
+      - 'invio-whatsapp/**'
       - '.github/workflows/build-apk.yml'
   workflow_dispatch:
 
@@ -62,6 +63,15 @@ jobs:
         working-directory: dicio
         run: ./gradlew assembleRelease --no-daemon -Porg.gradle.java.installations.paths="$JAVA_HOME_17_X64"
 
+      - name: Installa Gradle per Invio WhatsApp
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+
+      - name: Compila Invio WhatsApp
+        working-directory: invio-whatsapp
+        run: gradle assembleRelease --no-daemon -Pvc=$((100 + GITHUB_RUN_NUMBER))
+
       - name: Firma l'APK
         env:
           SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
@@ -73,6 +83,10 @@ jobs:
           "$BT/apksigner" sign --ks "$RUNNER_TEMP/ks.jks" --ks-key-alias claude \
             --ks-pass env:SIGNING_PASSWORD --out dicio-per-claude.apk "$RUNNER_TEMP/aligned.apk"
           "$BT/apksigner" verify dicio-per-claude.apk
+          "$BT/zipalign" -f -p 4 invio-whatsapp/build/outputs/apk/release/invio-whatsapp-release-unsigned.apk "$RUNNER_TEMP/aligned2.apk"
+          "$BT/apksigner" sign --ks "$RUNNER_TEMP/ks.jks" --ks-key-alias claude \
+            --ks-pass env:SIGNING_PASSWORD --out invio-whatsapp.apk "$RUNNER_TEMP/aligned2.apk"
+          "$BT/apksigner" verify invio-whatsapp.apk
           rm -f "$RUNNER_TEMP/ks.jks"
 
       - name: Pubblica la release
@@ -80,14 +94,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="build-${GITHUB_RUN_NUMBER}"
-          gh release create "$TAG" dicio-per-claude.apk \
+          gh release create "$TAG" dicio-per-claude.apk invio-whatsapp.apk \
             --target "$GITHUB_SHA" \
             --title "Dicio per Claude (build ${GITHUB_RUN_NUMBER})" \
-            --notes "Compilata dal branch ${GITHUB_REF_NAME}, commit ${GITHUB_SHA::7}. Scarica dicio-per-claude.apk qui sotto e installalo sopra la versione precedente." \
+            --notes "Compilata dal branch ${GITHUB_REF_NAME}, commit ${GITHUB_SHA::7}. Scarica dicio-per-claude.apk qui sotto e installalo sopra la versione precedente. invio-whatsapp.apk serve solo per inviare i messaggi WhatsApp da solo, va installato una volta." \
             --latest
 
       - name: Conserva l'APK anche come artifact
         uses: actions/upload-artifact@v5
         with:
           name: dicio-per-claude
-          path: dicio-per-claude.apk
+          path: |
+            dicio-per-claude.apk
+            invio-whatsapp.apk
