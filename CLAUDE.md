@@ -5,15 +5,20 @@ Salvo (lavora solo da telefono Oppo Reno 12 FS, Android, nessun computer) vuole 
 ## Cosa c'è nel repo
 - `hey_claudio.tflite` — modello openWakeWord addestrato per "Hey Claudio" (input [1,16,96] float32 → output [1,1]); soglia già spostata così che lo 0,8 fisso di Dicio corrisponda a 0,7 del modello grezzo.
 - `hey_claudio.onnx` — stesso modello, uscita grezza (soglia consigliata 0,7).
-- `apk/dicio-per-claude-v3.apk` — versione modificata di Dicio (package `org.stypox.dicio.claude`, versionCode 21, firmata con una chiave personale non presente nel repo). Quando sente "Hey Claudio" apre Claude (`com.anthropic.claude`) provando ACTION_ASSIST → ACTION_VOICE_COMMAND → avvio normale.
-- `dicio-per-claude/dicio-per-claude.patch` — tutte le modifiche a Dicio (base: commit in `dicio-per-claude/BASE_COMMIT` di https://github.com/Stypox/dicio-android); il modello va copiato in `app/src/main/assets/hey_claudio.tflite`.
+- `apk/dicio-per-claude-v4.apk` — versione modificata di Dicio (package `org.stypox.dicio.claude`, versionCode 22, firmata con una chiave nuova, diversa da quella della v3; la chiave è stata data a Salvo come file e NON è nel repo, che è pubblico). Quando sente "Hey Claudio" avvia `ClaudeTrampolineActivity` (invisibile, si mostra sopra la schermata di blocco e accende lo schermo), che chiede lo sblocco se il telefono è bloccato e poi apre Claude (`com.anthropic.claude`) provando ACTION_ASSIST → ACTION_VOICE_COMMAND → avvio normale.
+- `dicio-per-claude/dicio-per-claude.patch` — tutte le modifiche a Dicio (base: commit in `dicio-per-claude/BASE_COMMIT` di https://github.com/Stypox/dicio-android); si applica con `git apply`; il modello va copiato in `app/src/main/assets/hey_claudio.tflite` (cartella da creare).
 - `train_wakeword.ipynb` — notebook Colab di addestramento (su Colab è fragile: Python 3.13, datasets 4.x, scipy recente).
 
 ## Stato (2 nov 2026)
-- La parola viene riconosciuta sul telefono, ma Android/ColorOS blocca l'apertura di Claude da background: compare solo una notifica.
+- La parola viene riconosciuta sul telefono, ma con la v3 Android/ColorOS bloccava l'apertura di Claude da background (solo notifica).
 - Una versione con servizio di Accessibilità dava "App non installata" su ColorOS: tolta.
-- v3 usa il permesso "Mostra sopra altre app" (SYSTEM_ALERT_WINDOW); da verificare sul telefono se apre Claude e se lo apre già in modalità vocale (Claude impostato come assistente digitale predefinito).
+- v4 (da provare sul telefono) usa insieme due strade, perché il sistema può bloccarne una in silenzio:
+  1. avvio diretto grazie a "Mostra sopra altre app", con una finestrella sovrapposta invisibile 1x1 (da Android 15 il permesso vale solo se c'è una finestra sovrapposta visibile);
+  2. notifica a schermo intero (USE_FULL_SCREEN_INTENT, da Android 14 va concessa a mano), che a schermo spento il sistema apre da solo.
+  In più accende lo schermo (wake lock + turnScreenOn). Al primo avvio Dicio chiede, uno alla volta: sopra altre app → notifiche a schermo intero → nessuna ottimizzazione batteria.
+- Con blocco sicuro (PIN/impronta) serve comunque lo sblocco: Claude non può mostrarsi sopra la schermata di blocco. Lo sblocco col volto lo rende "senza mani".
 - Dopo l'apertura di Claude il microfono di Dicio si ferma 20 s per lasciarlo a Claude.
+- Claude va impostato come assistente digitale predefinito (al posto di Gemini) in Impostazioni → App → App predefinite → App assistente digitale.
 
 ## Come ricompilare l'APK
-Android SDK 36, JDK 21 + JDK 17 (toolchain richiesta da un modulo), Gradle wrapper di Dicio, `./gradlew assembleRelease`, poi zipalign + apksigner. Alzare sempre `versionCode` a ogni nuova versione. Se la chiave originale non è disponibile, Salvo deve disinstallare l'app prima di installare una build firmata con una chiave nuova.
+Android SDK 36, JDK 21 + JDK 17 (toolchain richiesta da un modulo: `-Porg.gradle.java.installations.paths=<jdk17>`), Gradle wrapper di Dicio, `./gradlew assembleRelease`, poi zipalign + apksigner. Se Maven Central risponde 429, usare in un init script di Gradle il mirror `https://maven-central.storage-download.googleapis.com/maven2/`. Alzare sempre `versionCode` a ogni nuova versione. Se la chiave originale non è disponibile, Salvo deve disinstallare l'app prima di installare una build firmata con una chiave nuova.
