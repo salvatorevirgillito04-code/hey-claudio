@@ -5,7 +5,7 @@ Salvo (lavora solo da telefono Oppo Reno 12 FS, Android, nessun computer) vuole 
 ## Cosa c'è nel repo
 - `hey_claudio.tflite` — modello openWakeWord addestrato per "Hey Claudio" (input [1,16,96] float32 → output [1,1]); soglia già spostata così che lo 0,8 fisso di Dicio corrisponda a 0,7 del modello grezzo.
 - `hey_claudio.onnx` — stesso modello, uscita grezza (soglia consigliata 0,7).
-- `apk/dicio-per-claude-v4.apk` — versione modificata di Dicio (package `org.stypox.dicio.claude`, versionCode 22, firmata con una chiave nuova, diversa da quella della v3; la chiave è stata data a Salvo come file e NON è nel repo, che è pubblico). Quando sente "Hey Claudio" avvia `ClaudeTrampolineActivity` (invisibile, si mostra sopra la schermata di blocco e accende lo schermo), che chiede lo sblocco se il telefono è bloccato e poi apre Claude (`com.anthropic.claude`) provando ACTION_ASSIST → ACTION_VOICE_COMMAND → avvio normale.
+- `apk/dicio-per-claude-v5.apk` — versione modificata di Dicio (package `org.stypox.dicio.claude`, versionCode 23, firmata con una chiave nuova, diversa da quella della v3; la chiave è stata data a Salvo come file e NON è nel repo, che è pubblico). Quando sente "Hey Claudio" avvia `ClaudeTrampolineActivity` (invisibile, si mostra sopra la schermata di blocco e accende lo schermo), che chiede lo sblocco se il telefono è bloccato e poi apre Claude (`com.anthropic.claude`) provando ACTION_ASSIST → ACTION_VOICE_COMMAND → avvio normale.
 - `dicio-per-claude/dicio-per-claude.patch` — tutte le modifiche a Dicio (base: commit in `dicio-per-claude/BASE_COMMIT` di https://github.com/Stypox/dicio-android); si applica con `git apply`; il modello va copiato in `app/src/main/assets/hey_claudio.tflite` (cartella da creare).
 - `train_wakeword.ipynb` — notebook Colab di addestramento (su Colab è fragile: Python 3.13, datasets 4.x, scipy recente).
 
@@ -16,6 +16,7 @@ Salvo (lavora solo da telefono Oppo Reno 12 FS, Android, nessun computer) vuole 
   1. avvio diretto grazie a "Mostra sopra altre app", con una finestrella sovrapposta invisibile 1x1 (da Android 15 il permesso vale solo se c'è una finestra sovrapposta visibile);
   2. notifica a schermo intero (USE_FULL_SCREEN_INTENT, da Android 14 va concessa a mano), che a schermo spento il sistema apre da solo.
   In più accende lo schermo (wake lock + turnScreenOn). Al primo avvio Dicio chiede, uno alla volta: sopra altre app → notifiche a schermo intero → nessuna ottimizzazione batteria.
+- v5 = v4 senza il permesso BIND_NOTIFICATION_LISTENER_SERVICE e senza il servizio NotifyHandler (abilità "notifiche" di Dicio): Play Protect bloccava l'installazione ("App bloccata per proteggere il tuo dispositivo", protezione antifrode per app installate da browser con permessi sensibili). Non aggiungere permessi come lettura notifiche, SMS o Accessibilità.
 - Con blocco sicuro (PIN/impronta) serve comunque lo sblocco: Claude non può mostrarsi sopra la schermata di blocco. Lo sblocco col volto lo rende "senza mani".
 - Dopo l'apertura di Claude il microfono di Dicio si ferma 20 s per lasciarlo a Claude.
 - Claude va impostato come assistente digitale predefinito (al posto di Gemini) in Impostazioni → App → App predefinite → App assistente digitale.
