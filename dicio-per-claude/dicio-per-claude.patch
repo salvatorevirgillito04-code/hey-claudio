@@ -1,5 +1,5 @@
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index f7ffad93..82a21de3 100644
+index f7ffad93..cf074f3e 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
 @@ -30,10 +30,10 @@ android {
@@ -11,7 +11,7 @@ index f7ffad93..82a21de3 100644
          minSdk = libs.versions.minSdk.get().toInt()
          targetSdk = libs.versions.targetSdk.get().toInt()
 -        versionCode = 19
-+        versionCode = 38
++        versionCode = 39
          versionName = "4.2"
          testInstrumentationRunner = "org.stypox.dicio.CustomTestRunner"
  
@@ -374,10 +374,10 @@ index 00000000..51142392
 +}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/AndroidCommandRecognizer.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/AndroidCommandRecognizer.kt
 new file mode 100644
-index 00000000..6430def1
+index 00000000..f3fd7737
 --- /dev/null
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/AndroidCommandRecognizer.kt
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,166 @@
 +package org.stypox.dicio.io.wake
 +
 +import android.content.ComponentName
@@ -469,6 +469,10 @@ index 00000000..6430def1
 +            .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
 +            .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
 +            .putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
++        if (android.os.Build.VERSION.SDK_INT >= 33) {
++            // helps the recognizer with names it would otherwise get wrong ("TikTok", "Mitch")
++            intent.putStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS, biasingStrings())
++        }
 +        return try {
 +            r.startListening(intent)
 +            true
@@ -477,6 +481,35 @@ index 00000000..6430def1
 +            stop()
 +            false
 +        }
++    }
++
++    private fun biasingStrings(): ArrayList<String> {
++        val list = arrayListOf(
++            "chiama", "telefona", "videochiama", "apri", "manda un messaggio", "scrivi a",
++            "su WhatsApp", "e invia", "in vivavoce", "metti una sveglia", "svegliami alle",
++            "portami a", "naviga verso", "accendi la torcia", "spegni la torcia", "sensibilità",
++        )
++        try {
++            val pm = context.packageManager
++            pm.queryIntentActivities(
++                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0
++            ).mapTo(list) { it.loadLabel(pm).toString() }
++        } catch (e: Exception) {
++            Log.w(TAG, "Cannot list apps", e)
++        }
++        try {
++            if (context.checkSelfPermission(android.Manifest.permission.READ_CONTACTS) ==
++                android.content.pm.PackageManager.PERMISSION_GRANTED) {
++                context.contentResolver.query(
++                    android.provider.ContactsContract.Contacts.CONTENT_URI,
++                    arrayOf(android.provider.ContactsContract.Contacts.DISPLAY_NAME),
++                    null, null, null
++                )?.use { c -> while (c.moveToNext()) c.getString(0)?.let { list.add(it) } }
++            }
++        } catch (e: Exception) {
++            Log.w(TAG, "Cannot list contacts", e)
++        }
++        return ArrayList(list.distinct().take(500))
 +    }
 +
 +    fun stop() {
@@ -1324,8 +1357,74 @@ index 00000000..c578f293
 +        }, 600L)
 +    }
 +}
+diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeSensitivity.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeSensitivity.kt
+new file mode 100644
+index 00000000..93e3500f
+--- /dev/null
++++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeSensitivity.kt
+@@ -0,0 +1,60 @@
++package org.stypox.dicio.io.wake
++
++import android.content.Context
++
++/**
++ * PATCH (Dicio per Claude): how easily "Hey Claudio" triggers. Changed by voice:
++ * "Hey Claudio, sensibilità bassa / media / alta". A detection needs the model score above the
++ * threshold for a number of consecutive 80 ms frames, which filters out short noises.
++ */
++object WakeSensitivity {
++    enum class Level(val label: String, val threshold: Float, val frames: Int) {
++        LOW("bassa", 0.93f, 3),
++        MEDIUM("media", 0.86f, 2),
++        HIGH("alta", 0.8f, 1),
++    }
++
++    private const val PREFS = "dicio_per_claude"
++    private const val KEY = "wake_sensitivity"
++
++    @Volatile
++    var level: Level = Level.MEDIUM
++        private set
++
++    fun load(context: Context) {
++        val name = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
++            .getString(KEY, Level.MEDIUM.name)
++        level = Level.entries.firstOrNull { it.name == name } ?: Level.MEDIUM
++    }
++
++    fun set(context: Context, newLevel: Level) {
++        level = newLevel
++        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
++            .putString(KEY, newLevel.name).apply()
++    }
++
++    private val COMMAND = Regex("""\bsensibilit[aà]\s+(?:al\s+)?(?:(bassa|minima|meno)|(media|normale)|(alta|massima|più|piu))\b""")
++
++    /** "sensibilità bassa" -> LOW, null if [text] is not a sensitivity command. */
++    fun parse(text: String): Level? {
++        val m = COMMAND.find(text.lowercase()) ?: return null
++        return when {
++            m.groupValues[1].isNotEmpty() -> Level.LOW
++            m.groupValues[2].isNotEmpty() -> Level.MEDIUM
++            else -> Level.HIGH
++        }
++    }
++
++    private var consecutive = 0
++
++    /** Called for each frame score; true when "Hey Claudio" is detected. */
++    fun isDetected(score: Float): Boolean {
++        val l = level
++        if (score > l.threshold) consecutive++ else consecutive = 0
++        if (consecutive >= l.frames) {
++            consecutive = 0
++            return true
++        }
++        return false
++    }
++}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
-index 81e12139..55f1661f 100644
+index 81e12139..c110e46f 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 @@ -35,6 +35,7 @@ import org.stypox.dicio.R
@@ -1345,7 +1444,15 @@ index 81e12139..55f1661f 100644
  
      private val handler = Handler(Looper.getMainLooper())
      private val releaseSttResourcesRunnable = Runnable {
-@@ -86,10 +89,24 @@ class WakeService : Service() {
+@@ -72,6 +75,7 @@ class WakeService : Service() {
+ 
+     override fun onCreate() {
+         super.onCreate()
++        WakeSensitivity.load(this)
+         notificationManager = getSystemService(this, NotificationManager::class.java)!!
+ 
+         scope.launch {
+@@ -86,10 +90,24 @@ class WakeService : Service() {
  
      override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
          if (intent?.action == ACTION_STOP_WAKE_SERVICE) {
@@ -1370,7 +1477,7 @@ index 81e12139..55f1661f 100644
          try {
              createForegroundNotification(wakeDevice.isHeyDicio.value)
          } catch (t: Throwable) {
-@@ -116,6 +133,18 @@ class WakeService : Service() {
+@@ -116,6 +134,18 @@ class WakeService : Service() {
              }
          }
  
@@ -1389,7 +1496,7 @@ index 81e12139..55f1661f 100644
          scope.launch {
              try {
                  listenForWakeWord()
-@@ -128,7 +157,72 @@ class WakeService : Service() {
+@@ -128,7 +158,72 @@ class WakeService : Service() {
          return START_STICKY
      }
  
@@ -1462,7 +1569,7 @@ index 81e12139..55f1661f 100644
          listening.set(false)
          job.cancel()
          wakeDevice.reinitializeToReleaseResources()
-@@ -210,7 +304,14 @@ class WakeService : Service() {
+@@ -210,7 +305,14 @@ class WakeService : Service() {
                  val wakeWordDetected = wakeDevice.processFrame(audio)
                  if (wakeWordDetected && Instant.now() > nextWakeWordAllowed) {
                      nextWakeWordAllowed = Instant.now().plusMillis(WAKE_WORD_BACKOFF_MILLIS)
@@ -1478,7 +1585,7 @@ index 81e12139..55f1661f 100644
                  }
  
                  lastHeard.set(Instant.now())
-@@ -221,61 +322,451 @@ class WakeService : Service() {
+@@ -221,61 +323,462 @@ class WakeService : Service() {
          }
      }
  
@@ -1568,8 +1675,19 @@ index 81e12139..55f1661f 100644
 +                        val cleaned = event.utterances.map { Pair(normalizeCommand(cleanCommand(it.first)), it.second) }
 +                        val best = cleaned.firstOrNull()?.first ?: ""
 +                        debugToast("Ho sentito (${commandRecognizerName()}): «$best»")
++                        val sensitivity = WakeSensitivity.parse(best)
 +                        when {
 +                            best.isEmpty() -> openVoicePanel("non ho sentito un comando")
++                            sensitivity != null -> finish("sensitivity") {
++                                WakeSensitivity.set(this, sensitivity)
++                                val text = "Sensibilità ${sensitivity.label}"
++                                debugToast(text)
++                                try {
++                                    speechOutputDevice.speak(text)
++                                } catch (e: Exception) {
++                                    Log.w(TAG, "Could not speak", e)
++                                }
++                            }
 +                            isActionStart(best.split(' ').filter { it.isNotEmpty() }) -> {
 +                                decided = true
 +                                clearTimeouts()
@@ -1969,7 +2087,7 @@ index 81e12139..55f1661f 100644
      companion object {
          /**
           * Starting from Android 11, it is not possible to start a foreground service
-@@ -308,10 +799,12 @@ class WakeService : Service() {
+@@ -308,10 +811,12 @@ class WakeService : Service() {
                  .setContentTitle(context.getString(R.string.wake_service_start_notification))
                  .setStyle(NotificationCompat.BigTextStyle().bigText(
                      context.getString(R.string.wake_service_start_notification_summary)))
@@ -1983,7 +2101,7 @@ index 81e12139..55f1661f 100644
                  .build()
  
              notificationManager.notify(START_NOTIFICATION_ID, notification)
-@@ -324,6 +817,7 @@ class WakeService : Service() {
+@@ -324,6 +829,7 @@ class WakeService : Service() {
           */
          fun start(context: Context) {
              Log.d(TAG, "WakeService.start() called from ${Throwable().stackTrace[1]}")
@@ -1991,7 +2109,7 @@ index 81e12139..55f1661f 100644
              val intent = Intent(context, WakeService::class.java)
              ContextCompat.startForegroundService(context, intent)
          }
-@@ -362,8 +856,89 @@ class WakeService : Service() {
+@@ -362,8 +868,89 @@ class WakeService : Service() {
              "org.stypox.dicio.io.wake.WakeService.TRIGGERED"
          private const val FOREGROUND_NOTIFICATION_ID = 19803672
          private const val START_NOTIFICATION_ID = 48019274
@@ -2507,7 +2625,7 @@ index 00000000..5b120b1a
 +    }
 +}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/oww/OpenWakeWordDevice.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/oww/OpenWakeWordDevice.kt
-index 9027a731..c7208456 100644
+index 9027a731..f6be04e6 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/io/wake/oww/OpenWakeWordDevice.kt
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/oww/OpenWakeWordDevice.kt
 @@ -32,7 +32,16 @@ class OpenWakeWordDevice(
@@ -2528,6 +2646,16 @@ index 9027a731..c7208456 100644
      private val userWakeFileExists = userWakeFile.exists()
      private val allModelFiles =
          // wakeFile is not needed if we want to use the userWakeFile instead
+@@ -107,7 +116,8 @@ class OpenWakeWordDevice(
+             audio[i] = audio16bitPcm[i].toFloat() / 32768.0f
+         }
+ 
+-        return model!!.processFrame(audio) > 0.8f
++        // PATCH (Dicio per Claude): adjustable sensitivity, see WakeSensitivity
++        return org.stypox.dicio.io.wake.WakeSensitivity.isDetected(model!!.processFrame(audio))
+     }
+ 
+     override fun frameSize(): Int {
 diff --git a/app/src/main/kotlin/org/stypox/dicio/skills/telephone/Contact.kt b/app/src/main/kotlin/org/stypox/dicio/skills/telephone/Contact.kt
 index 9d8b83b0..5d8dfad3 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/skills/telephone/Contact.kt
