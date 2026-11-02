@@ -1,5 +1,5 @@
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index f7ffad93..040c2cfd 100644
+index f7ffad93..9814f7c5 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
 @@ -30,10 +30,10 @@ android {
@@ -11,7 +11,7 @@ index f7ffad93..040c2cfd 100644
          minSdk = libs.versions.minSdk.get().toInt()
          targetSdk = libs.versions.targetSdk.get().toInt()
 -        versionCode = 19
-+        versionCode = 34
++        versionCode = 35
          versionName = "4.2"
          testInstrumentationRunner = "org.stypox.dicio.CustomTestRunner"
  
@@ -597,6 +597,79 @@ index 00000000..0d7939a9
 +            buildClaudeIntent(context) != null
 +    }
 +}
+diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/Fuzzy.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/Fuzzy.kt
+new file mode 100644
+index 00000000..f91951a9
+--- /dev/null
++++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/Fuzzy.kt
+@@ -0,0 +1,67 @@
++package org.stypox.dicio.io.wake
++
++import java.text.Normalizer
++
++/**
++ * PATCH (Dicio per Claude): "sounds like" matching for names said by voice and transcribed by the
++ * offline STT, which often gets them wrong ("apripista in gran" for "apri Instagram",
++ * "mich" for "Mitch"). Compares letters only, ignoring spaces and accents.
++ */
++object Fuzzy {
++    fun normalize(s: String): String =
++        Normalizer.normalize(s.lowercase(), Normalizer.Form.NFD)
++            .replace(Regex("""[^a-z0-9]"""), "")
++
++    private fun levenshtein(a: String, b: String): Int {
++        var prev = IntArray(b.length + 1) { it }
++        for (i in 1..a.length) {
++            val cur = IntArray(b.length + 1)
++            cur[0] = i
++            for (j in 1..b.length) {
++                cur[j] = minOf(
++                    prev[j] + 1, cur[j - 1] + 1,
++                    prev[j - 1] + if (a[i - 1] == b[j - 1]) 0 else 1
++                )
++            }
++            prev = cur
++        }
++        return prev[b.length]
++    }
++
++    /** 1.0 = same, 0.0 = completely different. */
++    fun similarity(said: String, name: String): Double {
++        val a = normalize(said)
++        if (a.isEmpty()) return 0.0
++        var best = 0.0
++        // the whole name, and each of its words ("Mitch Rossi" -> "mitch", "rossi")
++        val variants = listOf(name) + name.split(Regex("""\s+""")).filter { it.length > 1 }
++        for (variant in variants) {
++            val b = normalize(variant)
++            if (b.isEmpty()) continue
++            var sim = 1.0 - levenshtein(a, b).toDouble() / maxOf(a.length, b.length)
++            // "whatsapp" -> "WhatsApp Business"
++            if (b.length >= 3 && a.length >= 3 && (b.startsWith(a) || a.startsWith(b))) {
++                sim = maxOf(sim, 0.7)
++            }
++            best = maxOf(best, sim)
++        }
++        return best
++    }
++
++    /** The best item if it is similar enough and clearly better than the second one. */
++    fun <T> best(
++        said: String,
++        items: List<T>,
++        name: (T) -> String,
++        minSimilarity: Double = 0.45,
++    ): Pair<T?, List<T>> {
++        val scored = items.map { Pair(it, similarity(said, name(it))) }
++            .filter { it.second >= minSimilarity }
++            .sortedByDescending { it.second }
++        if (scored.isEmpty()) return Pair(null, emptyList())
++        val top = scored[0]
++        val ties = scored.filter { top.second - it.second < 0.08 }.map { it.first }
++        return if (ties.size == 1 || top.second >= 0.99) Pair(top.first, ties)
++        else Pair(null, ties) // ambiguous
++    }
++}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/Navigation.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/Navigation.kt
 new file mode 100644
 index 00000000..ce9fbdab
@@ -619,10 +692,10 @@ index 00000000..ce9fbdab
 +}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/PhoneActions.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/PhoneActions.kt
 new file mode 100644
-index 00000000..c3a8088e
+index 00000000..e3251864
 --- /dev/null
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/PhoneActions.kt
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,326 @@
 +package org.stypox.dicio.io.wake
 +
 +import android.Manifest
@@ -635,6 +708,7 @@ index 00000000..c3a8088e
 +import android.telephony.PhoneNumberUtils
 +import android.util.Log
 +import org.stypox.dicio.skills.telephone.Contact
++import org.stypox.dicio.skills.telephone.TelephoneSkill
 +import java.net.URLEncoder
 +
 +/**
@@ -655,7 +729,7 @@ index 00000000..c3a8088e
 +        /** Not a WhatsApp action: let Dicio's skills handle it. */
 +        data object NotHandled : Result
 +        /** Done; [speech] is said out loud if not null. */
-+        data class Done(val speech: String?) : Result
++        data class Done(val speech: String?, val info: String? = null) : Result
 +    }
 +
 +    private val WHATSAPP_WORDS = Regex("""\s*\b(?:su|con|via|tramite|in|di)\s+(?:whatsapp|whats\s*app|uozzap|uotsap)\b""")
@@ -695,7 +769,104 @@ index 00000000..c3a8088e
 +            rest = AUTO_SEND_SUFFIX.replace(rest, "").trim()
 +            return whatsappMessage(context, rest, autoSend)
 +        }
++        PHONE_CALL.find(text)?.let { return phoneCall(context, it.groupValues[1].trim()) }
++        OPEN_APP.find(text)?.let { return openApp(context, it.groupValues[1].trim()) }
 +        return Result.NotHandled
++    }
++
++    private val PHONE_CALL = Regex(
++        """^(?:chiama|chiamami|chiamare|chiamate|telefona|telefonare|telefonagli|telefonale|telefonami)\s+(?:a\s+|ad\s+|al\s+|alla\s+|allo\s+)?(.+)$"""
++    )
++    private val OPEN_APP = Regex(
++        """^(?:apri|aprimi|avvia|lancia|esegui|vai\s+su)\s+(?:l'app\s+|la\s+app\s+|l\s+app\s+|app\s+|applicazione\s+|l'applicazione\s+)?(.+)$"""
++    )
++
++    private data class NamedContact(val name: String, val id: String)
++
++    private fun allContacts(context: Context): List<NamedContact> {
++        val list = ArrayList<NamedContact>()
++        context.contentResolver.query(
++            ContactsContract.Contacts.CONTENT_URI,
++            arrayOf(ContactsContract.Contacts._ID, ContactsContract.Contacts.DISPLAY_NAME),
++            "${ContactsContract.Contacts.HAS_PHONE_NUMBER} = 1", null, null
++        )?.use { c ->
++            while (c.moveToNext()) {
++                val id = c.getString(0) ?: continue
++                val name = c.getString(1) ?: continue
++                list.add(NamedContact(name, id))
++            }
++        }
++        return list
++    }
++
++    private fun numbersOf(context: Context, contactId: String): List<String> {
++        val list = ArrayList<String>()
++        context.contentResolver.query(
++            ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
++            arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER),
++            "${ContactsContract.CommonDataKinds.Phone.CONTACT_ID} = ?", arrayOf(contactId), null
++        )?.use { c ->
++            while (c.moveToNext()) c.getString(0)?.let { list.add(it) }
++        }
++        return list.distinctBy { it.filter { ch -> ch.isDigit() } }
++    }
++
++    /** "chiama Mitch (in vivavoce)", done directly (not through Dicio's skill). */
++    private fun phoneCall(context: Context, rest: String): Result {
++        if (context.checkSelfPermission(Manifest.permission.READ_CONTACTS) !=
++            PackageManager.PERMISSION_GRANTED ||
++            context.checkSelfPermission(Manifest.permission.CALL_PHONE) !=
++            PackageManager.PERMISSION_GRANTED
++        ) {
++            return Result.Done("Per chiamare apri Dicio per Claude e consenti Contatti e Telefono")
++        }
++        val (who, speaker) = TelephoneSkill.extractSpeakerphone(rest)
++        if (who.isEmpty()) return Result.Done("Chi devo chiamare?")
++
++        val (contact, ties) = Fuzzy.best(who, allContacts(context), { it.name })
++        if (contact == null) {
++            return Result.Done(
++                if (ties.isEmpty()) "Non ho trovato $who nei contatti"
++                else "Ho trovato " + ties.take(3).joinToString(", ") { it.name } +
++                        ". Ripeti il comando con il nome completo"
++            )
++        }
++        val number = numbersOf(context, contact.id).firstOrNull()
++            ?: return Result.Done("${contact.name} non ha un numero di telefono")
++        Log.d(TAG, "Calling ${contact.name} speaker=$speaker")
++        TelephoneSkill.call(context, number, speaker)
++        return Result.Done(null, "Chiamo ${contact.name}" + if (speaker) " in vivavoce" else "")
++    }
++
++    /** "apri Instagram", with "sounds like" matching of the app name. */
++    private fun openApp(context: Context, name: String): Result {
++        val pm = context.packageManager
++        val apps = pm.queryIntentActivities(
++            Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0
++        ).map { Pair(it.loadLabel(pm).toString(), it.activityInfo.packageName) }
++            .distinctBy { it.second }
++        // also match the words of the package name ("WA Business" is com.whatsapp.w4b)
++        val (app, ties) = Fuzzy.best(name, apps, { (label, pkg) ->
++            label + " " + pkg.split('.')
++                .filter { it !in setOf("com", "android", "app", "org", "net", "it", "mobile") }
++                .joinToString(" ")
++        })
++        if (app == null) {
++            return Result.Done(
++                if (ties.isEmpty()) "Non ho trovato l'app $name"
++                else "Quale app? " + ties.take(3).joinToString(", ") { it.first }
++            )
++        }
++        val intent = pm.getLaunchIntentForPackage(app.second)
++            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++            ?: return Result.Done("Non riesco ad aprire ${app.first}")
++        return try {
++            context.startActivity(intent)
++            Result.Done(null, "Apro ${app.first}")
++        } catch (e: Exception) {
++            Log.w(TAG, "Could not open ${app.second}", e)
++            Result.Done("Non riesco ad aprire ${app.first}")
++        }
 +    }
 +
 +    private fun hasContactsPermission(context: Context) =
@@ -983,7 +1154,7 @@ index 00000000..c578f293
 +    }
 +}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
-index 81e12139..b0930b8a 100644
+index 81e12139..181c788f 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 @@ -35,6 +35,7 @@ import org.stypox.dicio.R
@@ -1136,7 +1307,7 @@ index 81e12139..b0930b8a 100644
                  }
  
                  lastHeard.set(Instant.now())
-@@ -221,61 +322,433 @@ class WakeService : Service() {
+@@ -221,61 +322,436 @@ class WakeService : Service() {
          }
      }
  
@@ -1171,23 +1342,34 @@ index 81e12139..b0930b8a 100644
 +    }
 +
 +    private var commandSession = 0
-+
+ 
+-        // Start listening and pass STT events to the skill evaluator.
+-        // Note that this works even if the MainActivity is opened later!
+-        sttInputDevice.tryLoad(skillEvaluator::processInputEvent)
 +    /** Must be called on the main thread. */
 +    private fun listenForCommand(wasScreenOff: Boolean) {
 +        val session = ++commandSession
 +        var decided = false
 +        var heardSomething = false
 +        val timeouts = mutableListOf<Runnable>()
-+
+ 
+-        // Unload the STT after a while because it would be using RAM uselessly
+-        handler.removeCallbacks(releaseSttResourcesRunnable)
+-        handler.postDelayed(releaseSttResourcesRunnable, RELEASE_STT_RESOURCES_MILLIS)
 +        fun clearTimeouts() {
 +            timeouts.forEach { handler.removeCallbacks(it) }
 +            timeouts.clear()
 +        }
-+
+ 
+-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || MainActivity.isInForeground > 0) {
+-            // start the activity directly on versions prior to Android 10,
+-            // or if the MainActivity is already running in the foreground
+-            startActivity(intent)
 +        fun finish(reason: String, then: () -> Unit) {
 +            if (decided || session != commandSession) return
 +            decided = true
 +            clearTimeouts()
++            micPausedUntil = Instant.now().plusMillis(RESUME_AFTER_COMMAND_MILLIS)
 +            Log.d(TAG, "Command decided: $reason")
 +            try {
 +                sttInputDevice.stopListening()
@@ -1196,7 +1378,7 @@ index 81e12139..b0930b8a 100644
 +            }
 +            then()
 +        }
-+
+ 
 +        fun openVoicePanel(reason: String) = finish(reason) {
 +            debugToast("Hey Claudio → apro Claude ($reason)")
 +            scope.launch { openClaude(wasScreenOff) }
@@ -1210,7 +1392,7 @@ index 81e12139..b0930b8a 100644
 +                        if (cleanCommand(event.utterance).isNotEmpty()) heardSomething = true
 +                    }
 +                    is InputEvent.Final -> {
-+                        val cleaned = event.utterances.map { Pair(cleanCommand(it.first), it.second) }
++                        val cleaned = event.utterances.map { Pair(normalizeCommand(cleanCommand(it.first)), it.second) }
 +                        val best = cleaned.firstOrNull()?.first ?: ""
 +                        debugToast("Ho sentito: «$best»")
 +                        when {
@@ -1218,6 +1400,12 @@ index 81e12139..b0930b8a 100644
 +                            isActionStart(best.split(' ').filter { it.isNotEmpty() }) -> {
 +                                decided = true
 +                                clearTimeouts()
++                                try {
++                                    sttInputDevice.stopListening()
++                                } catch (e: Exception) {
++                                    Log.w(TAG, "Could not stop STT", e)
++                                }
++                                micPausedUntil = Instant.now().plusMillis(RESUME_AFTER_COMMAND_MILLIS)
 +                                Log.d(TAG, "Phone action: $best")
 +                                debugToast("Eseguo: «$best»")
 +                                unregisterUnlockReceiver()
@@ -1242,13 +1430,11 @@ index 81e12139..b0930b8a 100644
 +        if (!started) {
 +            debugToast("Il riconoscimento vocale di Dicio non è pronto: apri Dicio per Claude e tocca una volta il microfono")
 +            decided = true
++            micPausedUntil = Instant.now().plusMillis(RESUME_AFTER_COMMAND_MILLIS)
 +            scope.launch { openClaude(wasScreenOff) }
 +            return
 +        }
- 
--        // Start listening and pass STT events to the skill evaluator.
--        // Note that this works even if the MainActivity is opened later!
--        sttInputDevice.tryLoad(skillEvaluator::processInputEvent)
++
 +        val silenceTimeout = Runnable {
 +            if (!heardSomething) openVoicePanel("silenzio")
 +        }
@@ -1258,10 +1444,7 @@ index 81e12139..b0930b8a 100644
 +        handler.postDelayed(silenceTimeout, COMMAND_SILENCE_MILLIS)
 +        handler.postDelayed(hardTimeout, COMMAND_MAX_MILLIS)
 +    }
- 
--        // Unload the STT after a while because it would be using RAM uselessly
--        handler.removeCallbacks(releaseSttResourcesRunnable)
--        handler.postDelayed(releaseSttResourcesRunnable, RELEASE_STT_RESOURCES_MILLIS)
++
 +    /**
 +     * PATCH (Dicio per Claude): writes [question] to Claude, sends it and reads the answer out loud
 +     * (through the accessibility service). If the phone is locked, waits for it to be unlocked.
@@ -1276,23 +1459,17 @@ index 81e12139..b0930b8a 100644
 +        val keyguard = getSystemService(this, android.app.KeyguardManager::class.java)
 +        if (keyguard?.isKeyguardLocked == true) {
 +            debugToast("Sblocca il telefono e chiedo a Claude: «$question»")
-+            micPausedUntil = Instant.now().plusMillis(UNLOCK_WAIT_MILLIS)
 +            waitForUnlockThen { handler.postDelayed({ askClaude(question) }, AFTER_UNLOCK_DELAY_MILLIS) }
 +            return
 +        }
 +        debugToast("Chiedo a Claude: «$question»")
-+        micPausedUntil = Instant.now().plusMillis(CLAUDE_ANSWER_MAX_MILLIS)
 +        val overlay = showInvisibleOverlay()
 +        handler.postDelayed({ removeOverlay(overlay) }, ACTION_OVERLAY_MILLIS)
 +        if (!WhatsAppSendService.askClaude(this, question)) {
 +            debugToast("Non riesco ad aprire l'app Claude")
 +        }
 +    }
- 
--        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || MainActivity.isInForeground > 0) {
--            // start the activity directly on versions prior to Android 10,
--            // or if the MainActivity is already running in the foreground
--            startActivity(intent)
++
 +    /**
 +     * PATCH (Dicio per Claude): runs a voice action ("apri Instagram", "chiama Mario in vivavoce",
 +     * "scrivi a Mario su whatsapp ciao"...). Must be called on the main thread. An invisible
@@ -1308,11 +1485,14 @@ index 81e12139..b0930b8a 100644
 +            PhoneActions.Result.Done("Si è verificato un errore")
 +        }
 +        when (result) {
-+            is PhoneActions.Result.Done -> result.speech?.let {
-+                try {
-+                    speechOutputDevice.speak(it)
-+                } catch (e: Exception) {
-+                    Log.w(TAG, "Could not speak", e)
++            is PhoneActions.Result.Done -> {
++                (result.speech ?: result.info)?.let { debugToast(it) }
++                result.speech?.let {
++                    try {
++                        speechOutputDevice.speak(it)
++                    } catch (e: Exception) {
++                        Log.w(TAG, "Could not speak", e)
++                    }
 +                }
 +            }
 +            PhoneActions.Result.NotHandled ->
@@ -1320,7 +1500,7 @@ index 81e12139..b0930b8a 100644
 +                skillEvaluator.processInputEvent(InputEvent.Final(cleaned))
 +        }
 +    }
- 
++
 +    /** Opens Claude; blocks for a short while, must NOT be called on the main thread. */
 +    private fun openClaude(wasScreenOff: Boolean) {
 +        if (!ClaudeTrampolineActivity.isClaudeInstalled(this)) {
@@ -1328,7 +1508,6 @@ index 81e12139..b0930b8a 100644
 +            showToast("App Claude non trovata")
 +            return
 +        }
-+        micPausedUntil = Instant.now().plusMillis(MIC_PAUSE_AFTER_WAKE_MILLIS)
 +
 +        // Preferred way: show Claude's assistant panel, exactly like a long press of the power
 +        // button does (also over the lock screen), if Claude is the default digital assistant.
@@ -1346,7 +1525,6 @@ index 81e12139..b0930b8a 100644
 +                // by itself: so open it again as soon as the phone gets unlocked.
 +                val keyguard = getSystemService(this, android.app.KeyguardManager::class.java)
 +                if (wasScreenOff || keyguard?.isKeyguardLocked == true) {
-+                    micPausedUntil = Instant.now().plusMillis(UNLOCK_WAIT_MILLIS)
 +                    handler.post { openClaudeAfterUnlock() }
 +                }
 +                return
@@ -1396,17 +1574,14 @@ index 81e12139..b0930b8a 100644
 +     * been in a voice call/communication) for [MIC_IDLE_BEFORE_RESUME_MILLIS].
 +     */
 +    private fun waitForClaudeConversationToEnd() {
++        // PATCH (Dicio per Claude): the wake word microphone is paused only while Dicio listens
++        // to the command (two recordings of the same app would not both get audio), then it is
++        // turned on again right away. When Claude listens (voice panel), Android gives the
++        // audio to Claude anyway, so there is no need to wait for it.
 +        val pausedAt = Instant.now()
-+        val minResume = pausedAt.plusMillis(MIC_PAUSE_AFTER_WAKE_MILLIS)
-+        if (micPausedUntil.isBefore(minResume)) micPausedUntil = minResume
-+        var lastBusy = pausedAt
-+        while (listening.get()) {
-+            val now = Instant.now()
-+            if (isMicrophoneBusy()) lastBusy = now
-+            if (now >= micPausedUntil &&
-+                now >= lastBusy.plusMillis(MIC_IDLE_BEFORE_RESUME_MILLIS)) break
-+            if (now >= pausedAt.plusMillis(MAX_MIC_PAUSE_MILLIS)) break
-+            Thread.sleep(500)
++        while (listening.get() && Instant.now() < micPausedUntil &&
++            Instant.now() < pausedAt.plusMillis(COMMAND_MAX_MILLIS + 2000L)) {
++            Thread.sleep(100)
 +        }
 +    }
 +
@@ -1463,7 +1638,6 @@ index 81e12139..b0930b8a 100644
 +            override fun onReceive(context: Context?, intent: Intent?) {
 +                Log.d(TAG, "Phone unlocked")
 +                unregisterUnlockReceiver()
-+                micPausedUntil = Instant.now().plusMillis(MIC_PAUSE_AFTER_WAKE_MILLIS)
 +                action()
 +            }
 +        }
@@ -1609,7 +1783,7 @@ index 81e12139..b0930b8a 100644
      companion object {
          /**
           * Starting from Android 11, it is not possible to start a foreground service
-@@ -308,10 +781,12 @@ class WakeService : Service() {
+@@ -308,10 +784,12 @@ class WakeService : Service() {
                  .setContentTitle(context.getString(R.string.wake_service_start_notification))
                  .setStyle(NotificationCompat.BigTextStyle().bigText(
                      context.getString(R.string.wake_service_start_notification_summary)))
@@ -1623,7 +1797,7 @@ index 81e12139..b0930b8a 100644
                  .build()
  
              notificationManager.notify(START_NOTIFICATION_ID, notification)
-@@ -324,6 +799,7 @@ class WakeService : Service() {
+@@ -324,6 +802,7 @@ class WakeService : Service() {
           */
          fun start(context: Context) {
              Log.d(TAG, "WakeService.start() called from ${Throwable().stackTrace[1]}")
@@ -1631,7 +1805,7 @@ index 81e12139..b0930b8a 100644
              val intent = Intent(context, WakeService::class.java)
              ContextCompat.startForegroundService(context, intent)
          }
-@@ -362,8 +838,59 @@ class WakeService : Service() {
+@@ -362,8 +841,88 @@ class WakeService : Service() {
              "org.stypox.dicio.io.wake.WakeService.TRIGGERED"
          private const val FOREGROUND_NOTIFICATION_ID = 19803672
          private const val START_NOTIFICATION_ID = 48019274
@@ -1647,7 +1821,7 @@ index 81e12139..b0930b8a 100644
 +        private const val MIC_PAUSE_AFTER_WAKE_MILLIS = 8000L
 +        private const val COMMAND_SILENCE_MILLIS = 2000L
 +        private const val ACTION_OVERLAY_MILLIS = 10000L
-+        private const val CLAUDE_ANSWER_MAX_MILLIS = 60000L
++        private const val RESUME_AFTER_COMMAND_MILLIS = 300L
 +        private const val DEBUG_TOASTS = true
 +        private const val COMMAND_MAX_MILLIS = 10000L
 +        private val LEADING_WAKE_WORDS = setOf(
@@ -1678,6 +1852,35 @@ index 81e12139..b0930b8a 100644
 +            "canzone", "traccia",
 +            "sveglia", "svegliami", "mettimi", "impostami", "crea", "fissa",
 +            "portami", "accompagnami", "naviga", "navigazione", "andiamo", "indicazioni", "percorso",
++        )
++
++        /**
++         * Fixes what the offline STT often does: action word glued to the next one
++         * ("apripista in gran" -> "apri pista in gran") and a junk word before the action
++         * ("di chiama mitch" -> "chiama mitch").
++         */
++        fun normalizeCommand(text: String): String {
++            val words = text.split(' ').filter { it.isNotEmpty() }.toMutableList()
++            if (words.isEmpty()) return text
++            for (skip in 0..minOf(2, words.size - 1)) {
++                val first = words[skip]
++                if (first in ACTION_WORDS) {
++                    return words.drop(skip).joinToString(" ")
++                }
++                val glued = GLUE_PREFIXES.firstOrNull {
++                    first.startsWith(it) && first.length >= it.length + 3
++                }
++                if (glued != null) {
++                    return (listOf(glued, first.removePrefix(glued)) + words.drop(skip + 1))
++                        .joinToString(" ")
++                }
++            }
++            return words.joinToString(" ")
++        }
++
++        private val GLUE_PREFIXES = listOf(
++            "telefona", "chiama", "videochiama", "apri", "avvia", "lancia", "scrivi", "manda",
++            "invia", "portami", "naviga", "svegliami", "accendi", "spegni",
 +        )
 +
 +        fun isActionStart(words: List<String>): Boolean {
