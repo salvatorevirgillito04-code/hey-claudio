@@ -1,5 +1,5 @@
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index f7ffad93..9814f7c5 100644
+index f7ffad93..92364d29 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
 @@ -30,10 +30,10 @@ android {
@@ -11,7 +11,7 @@ index f7ffad93..9814f7c5 100644
          minSdk = libs.versions.minSdk.get().toInt()
          targetSdk = libs.versions.targetSdk.get().toInt()
 -        versionCode = 19
-+        versionCode = 35
++        versionCode = 36
          versionName = "4.2"
          testInstrumentationRunner = "org.stypox.dicio.CustomTestRunner"
  
@@ -42,10 +42,10 @@ index f7ffad93..9814f7c5 100644
      coreLibraryDesugaring(libs.desugar.jdk.libs)
  
 diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
-index c66e4da0..4e2506a3 100644
+index c66e4da0..7fbffbaa 100644
 --- a/app/src/main/AndroidManifest.xml
 +++ b/app/src/main/AndroidManifest.xml
-@@ -10,7 +10,25 @@
+@@ -10,7 +10,28 @@
      <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
      <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
      <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
@@ -64,6 +64,9 @@ index c66e4da0..4e2506a3 100644
 +        <package android:name="com.whatsapp.w4b" />
 +        <package android:name="com.anthropic.claude" />
 +        <package android:name="com.google.android.apps.maps" />
++        <intent>
++            <action android:name="android.speech.RecognitionService" />
++        </intent>
 +    </queries>
 +    <!-- Dicio per Claude: restart the wake word service quickly if the app gets killed -->
 +    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
@@ -72,7 +75,7 @@ index c66e4da0..4e2506a3 100644
  
      <!-- required by the download manager for APIs < Q -->
      <uses-permission
-@@ -42,6 +60,7 @@
+@@ -42,6 +63,7 @@
          <activity
              android:name=".MainActivity"
              android:exported="true"
@@ -80,7 +83,7 @@ index c66e4da0..4e2506a3 100644
              android:windowSoftInputMode="adjustResize"
              android:launchMode="singleTop"
              android:showOnLockScreen="true">
-@@ -66,6 +85,47 @@
+@@ -66,6 +88,47 @@
                  android:resource="@xml/shortcuts" />
          </activity>
  
@@ -128,7 +131,7 @@ index c66e4da0..4e2506a3 100644
          <activity
              android:name=".error.ErrorActivity"
              android:exported="false" />
-@@ -102,16 +162,6 @@
+@@ -102,16 +165,6 @@
                  android:resource="@xml/stt_service_metadata" />
          </service>
  
@@ -367,6 +370,145 @@ index 00000000..51142392
 +        if (hour == 12 && (tail.contains("notte"))) hour = 0
 +        if (hour == 24) hour = 0
 +        return Alarm(hour, minute, null)
++    }
++}
+diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/AndroidCommandRecognizer.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/AndroidCommandRecognizer.kt
+new file mode 100644
+index 00000000..6430def1
+--- /dev/null
++++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/AndroidCommandRecognizer.kt
+@@ -0,0 +1,133 @@
++package org.stypox.dicio.io.wake
++
++import android.content.ComponentName
++import android.content.Context
++import android.content.Intent
++import android.os.Bundle
++import android.speech.RecognitionListener
++import android.speech.RecognitionService
++import android.speech.RecognizerIntent
++import android.speech.SpeechRecognizer
++import android.util.Log
++import org.stypox.dicio.io.input.InputEvent
++
++/**
++ * PATCH (Dicio per Claude): transcribes the command said after "Hey Claudio" with the phone's
++ * speech recognizer (Google's, if installed), which is much more accurate than the offline Vosk
++ * model ("apri TikTok" was transcribed as "appetito"). Must be used on the main thread.
++ */
++class AndroidCommandRecognizer(private val context: Context) {
++    private var recognizer: SpeechRecognizer? = null
++
++    /** The service used, for the on-screen messages. */
++    var serviceName: String = ""
++        private set
++
++    fun start(onEvent: (InputEvent) -> Unit): Boolean {
++        stop()
++        val component = pickService() ?: return false
++        serviceName = component.packageName
++        val r = try {
++            SpeechRecognizer.createSpeechRecognizer(context, component)
++        } catch (e: Exception) {
++            Log.w(TAG, "Cannot create speech recognizer", e)
++            return false
++        }
++        recognizer = r
++        r.setRecognitionListener(object : RecognitionListener {
++            private var done = false
++
++            private fun emit(event: InputEvent) {
++                if (done) return
++                if (event !is InputEvent.Partial) {
++                    done = true
++                    stop()
++                }
++                onEvent(event)
++            }
++
++            override fun onReadyForSpeech(params: Bundle?) {}
++            override fun onBeginningOfSpeech() = emit(InputEvent.Partial("..."))
++            override fun onRmsChanged(rmsdB: Float) {}
++            override fun onBufferReceived(buffer: ByteArray?) {}
++            override fun onEndOfSpeech() {}
++            override fun onEvent(eventType: Int, params: Bundle?) {}
++
++            override fun onPartialResults(partialResults: Bundle?) {
++                partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
++                    ?.firstOrNull()?.takeIf { it.isNotBlank() }
++                    ?.let { emit(InputEvent.Partial(it)) }
++            }
++
++            override fun onResults(results: Bundle?) {
++                val texts = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
++                    ?.filter { it.isNotBlank() }
++                if (texts.isNullOrEmpty()) {
++                    emit(InputEvent.None)
++                    return
++                }
++                val scores = results.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)
++                emit(InputEvent.Final(texts.mapIndexed { i, text ->
++                    Pair(text, scores?.getOrNull(i)?.takeIf { it >= 0 } ?: (1f - i * 0.1f))
++                }))
++            }
++
++            override fun onError(error: Int) {
++                Log.w(TAG, "Speech recognizer error $error")
++                emit(
++                    if (error == SpeechRecognizer.ERROR_NO_MATCH ||
++                        error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) InputEvent.None
++                    else InputEvent.Error(Exception("errore $error del riconoscimento di $serviceName"))
++                )
++            }
++        })
++
++        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
++            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
++            .putExtra(RecognizerIntent.EXTRA_LANGUAGE, "it-IT")
++            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "it-IT")
++            .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
++            .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
++            .putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
++        return try {
++            r.startListening(intent)
++            true
++        } catch (e: Exception) {
++            Log.w(TAG, "Cannot start speech recognizer", e)
++            stop()
++            false
++        }
++    }
++
++    fun stop() {
++        recognizer?.let {
++            try {
++                it.cancel()
++                it.destroy()
++            } catch (e: Exception) {
++                Log.w(TAG, "Cannot stop speech recognizer", e)
++            }
++        }
++        recognizer = null
++    }
++
++    /** Google's recognizer if installed, otherwise any other one except Dicio's own. */
++    private fun pickService(): ComponentName? {
++        val services = try {
++            context.packageManager
++                .queryIntentServices(Intent(RecognitionService.SERVICE_INTERFACE), 0)
++                .map { ComponentName(it.serviceInfo.packageName, it.serviceInfo.name) }
++                .filter { it.packageName != context.packageName }
++        } catch (e: Exception) {
++            emptyList()
++        }
++        return services.firstOrNull { it.packageName == "com.google.android.googlequicksearchbox" }
++            ?: services.firstOrNull { it.packageName == "com.google.android.tts" }
++            ?: services.firstOrNull { it.packageName.startsWith("com.google") }
++            ?: services.firstOrNull()
++    }
++
++    companion object {
++        private const val TAG = "AndroidCommandRecognizer"
 +    }
 +}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/BootBroadcastReceiver.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/BootBroadcastReceiver.kt
@@ -1154,7 +1296,7 @@ index 00000000..c578f293
 +    }
 +}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
-index 81e12139..181c788f 100644
+index 81e12139..53f4d4a5 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 @@ -35,6 +35,7 @@ import org.stypox.dicio.R
@@ -1307,7 +1449,7 @@ index 81e12139..181c788f 100644
                  }
  
                  lastHeard.set(Instant.now())
-@@ -221,61 +322,436 @@ class WakeService : Service() {
+@@ -221,61 +322,441 @@ class WakeService : Service() {
          }
      }
  
@@ -1342,10 +1484,17 @@ index 81e12139..181c788f 100644
 +    }
 +
 +    private var commandSession = 0
- 
--        // Start listening and pass STT events to the skill evaluator.
--        // Note that this works even if the MainActivity is opened later!
--        sttInputDevice.tryLoad(skillEvaluator::processInputEvent)
++    private val commandRecognizer by lazy { AndroidCommandRecognizer(this) }
++
++    private fun stopCommandListening() {
++        commandRecognizer.stop()
++        try {
++            sttInputDevice.stopListening()
++        } catch (e: Exception) {
++            Log.w(TAG, "Could not stop STT", e)
++        }
++    }
++
 +    /** Must be called on the main thread. */
 +    private fun listenForCommand(wasScreenOff: Boolean) {
 +        val session = ++commandSession
@@ -1353,32 +1502,24 @@ index 81e12139..181c788f 100644
 +        var heardSomething = false
 +        val timeouts = mutableListOf<Runnable>()
  
--        // Unload the STT after a while because it would be using RAM uselessly
--        handler.removeCallbacks(releaseSttResourcesRunnable)
--        handler.postDelayed(releaseSttResourcesRunnable, RELEASE_STT_RESOURCES_MILLIS)
+-        // Start listening and pass STT events to the skill evaluator.
+-        // Note that this works even if the MainActivity is opened later!
+-        sttInputDevice.tryLoad(skillEvaluator::processInputEvent)
 +        fun clearTimeouts() {
 +            timeouts.forEach { handler.removeCallbacks(it) }
 +            timeouts.clear()
 +        }
- 
--        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || MainActivity.isInForeground > 0) {
--            // start the activity directly on versions prior to Android 10,
--            // or if the MainActivity is already running in the foreground
--            startActivity(intent)
++
 +        fun finish(reason: String, then: () -> Unit) {
 +            if (decided || session != commandSession) return
 +            decided = true
 +            clearTimeouts()
 +            micPausedUntil = Instant.now().plusMillis(RESUME_AFTER_COMMAND_MILLIS)
 +            Log.d(TAG, "Command decided: $reason")
-+            try {
-+                sttInputDevice.stopListening()
-+            } catch (e: Exception) {
-+                Log.w(TAG, "Could not stop STT", e)
-+            }
++            stopCommandListening()
 +            then()
 +        }
- 
++
 +        fun openVoicePanel(reason: String) = finish(reason) {
 +            debugToast("Hey Claudio → apro Claude ($reason)")
 +            scope.launch { openClaude(wasScreenOff) }
@@ -1400,11 +1541,7 @@ index 81e12139..181c788f 100644
 +                            isActionStart(best.split(' ').filter { it.isNotEmpty() }) -> {
 +                                decided = true
 +                                clearTimeouts()
-+                                try {
-+                                    sttInputDevice.stopListening()
-+                                } catch (e: Exception) {
-+                                    Log.w(TAG, "Could not stop STT", e)
-+                                }
++                                stopCommandListening()
 +                                micPausedUntil = Instant.now().plusMillis(RESUME_AFTER_COMMAND_MILLIS)
 +                                Log.d(TAG, "Phone action: $best")
 +                                debugToast("Eseguo: «$best»")
@@ -1420,8 +1557,14 @@ index 81e12139..181c788f 100644
 +                }
 +            }
 +        }
-+
-+        val started = try {
+ 
+-        // Unload the STT after a while because it would be using RAM uselessly
+-        handler.removeCallbacks(releaseSttResourcesRunnable)
+-        handler.postDelayed(releaseSttResourcesRunnable, RELEASE_STT_RESOURCES_MILLIS)
++        // Google's (or the phone's) speech recognizer, much more accurate; Dicio's offline one
++        // (Vosk) only if there is no other recognizer
++        val started = commandRecognizer.start(listener) || try {
++            debugToast("Uso il riconoscimento vocale offline di Dicio (meno preciso)")
 +            sttInputDevice.tryLoad(listener)
 +        } catch (e: Exception) {
 +            Log.w(TAG, "Could not start STT", e)
@@ -1444,7 +1587,11 @@ index 81e12139..181c788f 100644
 +        handler.postDelayed(silenceTimeout, COMMAND_SILENCE_MILLIS)
 +        handler.postDelayed(hardTimeout, COMMAND_MAX_MILLIS)
 +    }
-+
+ 
+-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || MainActivity.isInForeground > 0) {
+-            // start the activity directly on versions prior to Android 10,
+-            // or if the MainActivity is already running in the foreground
+-            startActivity(intent)
 +    /**
 +     * PATCH (Dicio per Claude): writes [question] to Claude, sends it and reads the answer out loud
 +     * (through the accessibility service). If the phone is locked, waits for it to be unlocked.
@@ -1469,7 +1616,7 @@ index 81e12139..181c788f 100644
 +            debugToast("Non riesco ad aprire l'app Claude")
 +        }
 +    }
-+
+ 
 +    /**
 +     * PATCH (Dicio per Claude): runs a voice action ("apri Instagram", "chiama Mario in vivavoce",
 +     * "scrivi a Mario su whatsapp ciao"...). Must be called on the main thread. An invisible
@@ -1760,13 +1907,13 @@ index 81e12139..181c788f 100644
 +            .setTimeoutAfter(TRIGGERED_NOTIFICATION_TIMEOUT_MILLIS)
 +            .setFullScreenIntent(pendingIntent, true)
 +            .build()
- 
--            notificationManager.cancel(TRIGGERED_NOTIFICATION_ID)
--            notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
++
 +        notificationManager.cancel(TRIGGERED_NOTIFICATION_ID)
 +        notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
 +    }
-+
+ 
+-            notificationManager.cancel(TRIGGERED_NOTIFICATION_ID)
+-            notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
 +    /** PATCH (Dicio per Claude): on-screen messages to understand what happens, for testing. */
 +    private fun debugToast(text: String) {
 +        if (DEBUG_TOASTS) {
@@ -1783,7 +1930,7 @@ index 81e12139..181c788f 100644
      companion object {
          /**
           * Starting from Android 11, it is not possible to start a foreground service
-@@ -308,10 +784,12 @@ class WakeService : Service() {
+@@ -308,10 +789,12 @@ class WakeService : Service() {
                  .setContentTitle(context.getString(R.string.wake_service_start_notification))
                  .setStyle(NotificationCompat.BigTextStyle().bigText(
                      context.getString(R.string.wake_service_start_notification_summary)))
@@ -1797,7 +1944,7 @@ index 81e12139..181c788f 100644
                  .build()
  
              notificationManager.notify(START_NOTIFICATION_ID, notification)
-@@ -324,6 +802,7 @@ class WakeService : Service() {
+@@ -324,6 +807,7 @@ class WakeService : Service() {
           */
          fun start(context: Context) {
              Log.d(TAG, "WakeService.start() called from ${Throwable().stackTrace[1]}")
@@ -1805,7 +1952,7 @@ index 81e12139..181c788f 100644
              val intent = Intent(context, WakeService::class.java)
              ContextCompat.startForegroundService(context, intent)
          }
-@@ -362,8 +841,88 @@ class WakeService : Service() {
+@@ -362,8 +846,88 @@ class WakeService : Service() {
              "org.stypox.dicio.io.wake.WakeService.TRIGGERED"
          private const val FOREGROUND_NOTIFICATION_ID = 19803672
          private const val START_NOTIFICATION_ID = 48019274
@@ -1819,7 +1966,7 @@ index 81e12139..181c788f 100644
 +        private const val TRIGGERED_NOTIFICATION_TIMEOUT_MILLIS = 30000L
          private const val WAKE_WORD_BACKOFF_MILLIS = 4000L
 +        private const val MIC_PAUSE_AFTER_WAKE_MILLIS = 8000L
-+        private const val COMMAND_SILENCE_MILLIS = 2000L
++        private const val COMMAND_SILENCE_MILLIS = 3500L
 +        private const val ACTION_OVERLAY_MILLIS = 10000L
 +        private const val RESUME_AFTER_COMMAND_MILLIS = 300L
 +        private const val DEBUG_TOASTS = true
