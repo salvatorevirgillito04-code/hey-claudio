@@ -1,5 +1,5 @@
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index f7ffad93..bcb615b0 100644
+index f7ffad93..dcbeb879 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
 @@ -30,10 +30,10 @@ android {
@@ -11,7 +11,7 @@ index f7ffad93..bcb615b0 100644
          minSdk = libs.versions.minSdk.get().toInt()
          targetSdk = libs.versions.targetSdk.get().toInt()
 -        versionCode = 19
-+        versionCode = 27
++        versionCode = 28
          versionName = "4.2"
          testInstrumentationRunner = "org.stypox.dicio.CustomTestRunner"
  
@@ -42,10 +42,10 @@ index f7ffad93..bcb615b0 100644
      coreLibraryDesugaring(libs.desugar.jdk.libs)
  
 diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
-index c66e4da0..8cdc31a9 100644
+index c66e4da0..8f1b1f06 100644
 --- a/app/src/main/AndroidManifest.xml
 +++ b/app/src/main/AndroidManifest.xml
-@@ -10,7 +10,13 @@
+@@ -10,7 +10,15 @@
      <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
      <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
      <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
@@ -55,12 +55,14 @@ index c66e4da0..8cdc31a9 100644
 +    <!-- Dicio per Claude: wake up the screen and keep listening with the screen off -->
 +    <uses-permission android:name="android.permission.WAKE_LOCK" />
 +    <uses-permission android:name="android.permission.VIBRATE" />
++    <!-- Dicio per Claude: restart the wake word service quickly if the app gets killed -->
++    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 +    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 +    <!-- Dicio per Claude: BIND_NOTIFICATION_LISTENER_SERVICE removed, Play Protect blocks sideloaded apps that use it -->
  
      <!-- required by the download manager for APIs < Q -->
      <uses-permission
-@@ -42,6 +48,7 @@
+@@ -42,6 +50,7 @@
          <activity
              android:name=".MainActivity"
              android:exported="true"
@@ -68,7 +70,7 @@ index c66e4da0..8cdc31a9 100644
              android:windowSoftInputMode="adjustResize"
              android:launchMode="singleTop"
              android:showOnLockScreen="true">
-@@ -66,6 +73,18 @@
+@@ -66,6 +75,33 @@
                  android:resource="@xml/shortcuts" />
          </activity>
  
@@ -84,10 +86,25 @@ index c66e4da0..8cdc31a9 100644
 +            android:turnScreenOn="true"
 +            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 +
++        <!-- Dicio per Claude: restart the wake word service after the app gets killed -->
++        <activity
++            android:name=".io.wake.WakeRestartActivity"
++            android:exported="false"
++            android:excludeFromRecents="true"
++            android:noHistory="true"
++            android:taskAffinity="org.stypox.dicio.claude.restart"
++            android:launchMode="singleInstance"
++            android:showWhenLocked="true"
++            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
++
++        <receiver
++            android:name=".io.wake.WakeRestartReceiver"
++            android:exported="false" />
++
          <activity
              android:name=".error.ErrorActivity"
              android:exported="false" />
-@@ -102,16 +121,6 @@
+@@ -102,16 +138,6 @@
                  android:resource="@xml/stt_service_metadata" />
          </service>
  
@@ -174,6 +191,27 @@ index 4a8b8c31..709beeb7 100644
          var isCreated: Int = 0
              private set
  
+diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/BootBroadcastReceiver.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/BootBroadcastReceiver.kt
+index c4f3e565..4f62184d 100644
+--- a/app/src/main/kotlin/org/stypox/dicio/io/wake/BootBroadcastReceiver.kt
++++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/BootBroadcastReceiver.kt
+@@ -39,6 +39,16 @@ class BootBroadcastReceiver : BroadcastReceiver() {
+                     // https://developer.android.com/about/versions/15/behavior-changes-15#fgs-boot-completed
+                     Log.d(TAG, "Creating notification")
+                     WakeService.createNotificationToStartLater(context)
++                    // PATCH (Dicio per Claude): also try to restart by itself as soon as the
++                    // screen is turned on (the notification is removed if this works)
++                    if (WakeRestart.canRun(context)) {
++                        try {
++                            context.startService(Intent(context, WakeService::class.java)
++                                .setAction(WakeRestart.ACTION_RESTART))
++                        } catch (e: Exception) {
++                            Log.w(TAG, "Could not start WakeService for restart", e)
++                        }
++                    }
+                 } else {
+                     Log.d(TAG, "Starting service")
+                     WakeService.start(context)
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/ClaudeAssist.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/ClaudeAssist.kt
 new file mode 100644
 index 00000000..fb8b54bd
@@ -381,19 +419,251 @@ index 00000000..0d7939a9
 +            buildClaudeIntent(context) != null
 +    }
 +}
+diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeRestart.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeRestart.kt
+new file mode 100644
+index 00000000..c578f293
+--- /dev/null
++++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeRestart.kt
+@@ -0,0 +1,125 @@
++package org.stypox.dicio.io.wake
++
++import android.Manifest.permission.RECORD_AUDIO
++import android.app.Activity
++import android.app.AlarmManager
++import android.app.PendingIntent
++import android.content.BroadcastReceiver
++import android.content.Context
++import android.content.Intent
++import android.content.pm.PackageManager
++import android.os.Build
++import android.os.Bundle
++import android.os.Handler
++import android.os.Looper
++import android.os.SystemClock
++import android.util.Log
++import androidx.core.content.ContextCompat
++
++/**
++ * PATCH (Dicio per Claude): keeps "Hey Claudio" listening even after ColorOS kills the app (e.g.
++ * when it is closed from the recent apps).
++ *
++ * Android does not let an app in the background turn the microphone on, so restarting the
++ * [WakeService] goes through [WakeRestartActivity], an invisible activity: while it is shown the
++ * app is in the foreground, and the service can be started with access to the microphone.
++ */
++object WakeRestart {
++    private const val TAG = "WakeRestart"
++    private const val PREFS = "dicio_per_claude"
++    private const val KEY_STOPPED_BY_USER = "wake_stopped_by_user"
++    private const val ALARM_REQUEST_CODE = 7301
++    const val ACTION_RESTART = "org.stypox.dicio.io.wake.WakeService.ACTION_RESTART"
++    const val AFTER_TASK_REMOVED_DELAY_MILLIS = 3000L
++    const val WATCHDOG_INTERVAL_MILLIS = 1000L * 60 * 15 // 15 minutes
++
++    fun setStoppedByUser(context: Context, stopped: Boolean) {
++        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
++            .putBoolean(KEY_STOPPED_BY_USER, stopped).apply()
++        if (stopped) cancelAlarm(context)
++    }
++
++    fun isStoppedByUser(context: Context): Boolean =
++        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
++            .getBoolean(KEY_STOPPED_BY_USER, false)
++
++    private fun alarmIntent(context: Context): PendingIntent =
++        PendingIntent.getBroadcast(
++            context,
++            ALARM_REQUEST_CODE,
++            Intent(context, WakeRestartReceiver::class.java),
++            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
++        )
++
++    /** Schedules a check (and restart if needed) of the wake word service after [delayMillis]. */
++    fun scheduleCheck(context: Context, delayMillis: Long) {
++        if (isStoppedByUser(context)) return
++        try {
++            val am = context.getSystemService(AlarmManager::class.java) ?: return
++            val at = SystemClock.elapsedRealtime() + delayMillis
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
++                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || am.canScheduleExactAlarms()) {
++                    am.setExactAndAllowWhileIdle(
++                        AlarmManager.ELAPSED_REALTIME_WAKEUP, at, alarmIntent(context))
++                } else {
++                    am.setAndAllowWhileIdle(
++                        AlarmManager.ELAPSED_REALTIME_WAKEUP, at, alarmIntent(context))
++                }
++            } else {
++                am.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, at, alarmIntent(context))
++            }
++        } catch (e: Exception) {
++            Log.w(TAG, "Could not schedule restart check", e)
++        }
++    }
++
++    private fun cancelAlarm(context: Context) {
++        try {
++            context.getSystemService(AlarmManager::class.java)?.cancel(alarmIntent(context))
++        } catch (e: Exception) {
++            Log.w(TAG, "Could not cancel restart check", e)
++        }
++    }
++
++    fun canRun(context: Context): Boolean =
++        !isStoppedByUser(context) &&
++                ContextCompat.checkSelfPermission(context, RECORD_AUDIO) ==
++                PackageManager.PERMISSION_GRANTED
++}
++
++/** Fired by the alarm: makes sure the wake word service is running. */
++class WakeRestartReceiver : BroadcastReceiver() {
++    override fun onReceive(context: Context, intent: Intent?) {
++        if (!WakeRestart.canRun(context)) return
++        // periodic watchdog, in case the app gets killed without notice
++        WakeRestart.scheduleCheck(context, WakeRestart.WATCHDOG_INTERVAL_MILLIS)
++        try {
++            // a plain (not foreground) start, allowed thanks to the "allow while idle" alarm;
++            // the service will then restart itself through WakeRestartActivity if needed
++            context.startService(
++                Intent(context, WakeService::class.java).setAction(WakeRestart.ACTION_RESTART))
++        } catch (e: Exception) {
++            Log.w("WakeRestartReceiver", "Could not start WakeService", e)
++        }
++    }
++}
++
++/** Invisible activity: starting the service from here gives it access to the microphone. */
++class WakeRestartActivity : Activity() {
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
++            setShowWhenLocked(true)
++        }
++        try {
++            WakeService.start(this)
++        } catch (e: Exception) {
++            Log.w("WakeRestartActivity", "Could not start WakeService", e)
++        }
++        Handler(Looper.getMainLooper()).postDelayed({
++            finish()
++            @Suppress("DEPRECATION")
++            overridePendingTransition(0, 0)
++        }, 600L)
++    }
++}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
-index 81e12139..7e61471a 100644
+index 81e12139..dc8fe255 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
-@@ -129,6 +129,7 @@ class WakeService : Service() {
+@@ -86,10 +86,24 @@ class WakeService : Service() {
+ 
+     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+         if (intent?.action == ACTION_STOP_WAKE_SERVICE) {
++            WakeRestart.setStoppedByUser(this, true)
+             listening.set(false)
+             return START_NOT_STICKY
+         }
+ 
++        // PATCH (Dicio per Claude): restarted by the system (null intent) after the app was
++        // killed, or by the watchdog alarm: the microphone can't be turned on from the
++        // background, so go through the invisible WakeRestartActivity
++        if (intent == null || intent.action == WakeRestart.ACTION_RESTART) {
++            if (listening.get()) return START_STICKY
++            if (!WakeRestart.canRun(this)) {
++                stopSelf()
++                return START_NOT_STICKY
++            }
++            restartFromForegroundActivity()
++            return START_STICKY
++        }
++
+         try {
+             createForegroundNotification(wakeDevice.isHeyDicio.value)
+         } catch (t: Throwable) {
+@@ -116,6 +130,10 @@ class WakeService : Service() {
+             }
+         }
+ 
++        WakeRestart.scheduleCheck(this, WakeRestart.WATCHDOG_INTERVAL_MILLIS)
++        notificationManager.cancel(START_NOTIFICATION_ID)
++        handler.post { unregisterScreenOnReceiver() }
++
+         scope.launch {
+             try {
+                 listenForWakeWord()
+@@ -128,7 +146,72 @@ class WakeService : Service() {
+         return START_STICKY
      }
  
++    override fun onTaskRemoved(rootIntent: Intent?) {
++        // PATCH (Dicio per Claude): ColorOS may kill the app right after it is closed from the
++        // recent apps, so make sure it gets restarted
++        WakeRestart.scheduleCheck(this, WakeRestart.AFTER_TASK_REMOVED_DELAY_MILLIS)
++        super.onTaskRemoved(rootIntent)
++    }
++
++    private var screenOnReceiver: android.content.BroadcastReceiver? = null
++
++    /** Must be called on the main thread. */
++    private fun unregisterScreenOnReceiver() {
++        screenOnReceiver?.let {
++            try {
++                unregisterReceiver(it)
++            } catch (e: Exception) {
++                Log.w(TAG, "Could not unregister screen on receiver", e)
++            }
++        }
++        screenOnReceiver = null
++    }
++
++    private fun restartFromForegroundActivity() {
++        handler.post {
++            if (listening.get()) return@post
++            val pm = getSystemService(this, android.os.PowerManager::class.java)
++            if (pm != null && !pm.isInteractive) {
++                // an activity can't be in the foreground with the screen off: wait for it to be on
++                if (screenOnReceiver != null) return@post
++                val receiver = object : android.content.BroadcastReceiver() {
++                    override fun onReceive(context: Context?, intent: Intent?) {
++                        unregisterScreenOnReceiver()
++                        restartFromForegroundActivity()
++                    }
++                }
++                try {
++                    ContextCompat.registerReceiver(
++                        this, receiver,
++                        android.content.IntentFilter(Intent.ACTION_SCREEN_ON).apply {
++                            addAction(Intent.ACTION_USER_PRESENT)
++                        },
++                        ContextCompat.RECEIVER_EXPORTED
++                    )
++                    screenOnReceiver = receiver
++                } catch (e: Exception) {
++                    Log.w(TAG, "Could not wait for screen on", e)
++                }
++                return@post
++            }
++
++            Log.d(TAG, "Restarting the wake word service through WakeRestartActivity")
++            val overlay = showInvisibleOverlay()
++            try {
++                startActivity(
++                    Intent(this, WakeRestartActivity::class.java)
++                        .addFlags(FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
++                )
++            } catch (e: Exception) {
++                Log.w(TAG, "Could not start WakeRestartActivity", e)
++            }
++            handler.postDelayed({ removeOverlay(overlay) }, OVERLAY_DURATION_MILLIS)
++        }
++    }
++
      override fun onDestroy() {
++        handler.post { unregisterScreenOnReceiver() }
 +        handler.post { unregisterUnlockReceiver() }
          listening.set(false)
          job.cancel()
          wakeDevice.reinitializeToReleaseResources()
-@@ -210,7 +211,14 @@ class WakeService : Service() {
+@@ -210,7 +293,14 @@ class WakeService : Service() {
                  val wakeWordDetected = wakeDevice.processFrame(audio)
                  if (wakeWordDetected && Instant.now() > nextWakeWordAllowed) {
                      nextWakeWordAllowed = Instant.now().plusMillis(WAKE_WORD_BACKOFF_MILLIS)
@@ -409,7 +679,7 @@ index 81e12139..7e61471a 100644
                  }
  
                  lastHeard.set(Instant.now())
-@@ -221,61 +229,263 @@ class WakeService : Service() {
+@@ -221,61 +311,263 @@ class WakeService : Service() {
          }
      }
  
@@ -716,7 +986,7 @@ index 81e12139..7e61471a 100644
      companion object {
          /**
           * Starting from Android 11, it is not possible to start a foreground service
-@@ -308,10 +518,12 @@ class WakeService : Service() {
+@@ -308,10 +600,12 @@ class WakeService : Service() {
                  .setContentTitle(context.getString(R.string.wake_service_start_notification))
                  .setStyle(NotificationCompat.BigTextStyle().bigText(
                      context.getString(R.string.wake_service_start_notification_summary)))
@@ -730,7 +1000,15 @@ index 81e12139..7e61471a 100644
                  .build()
  
              notificationManager.notify(START_NOTIFICATION_ID, notification)
-@@ -362,8 +574,17 @@ class WakeService : Service() {
+@@ -324,6 +618,7 @@ class WakeService : Service() {
+          */
+         fun start(context: Context) {
+             Log.d(TAG, "WakeService.start() called from ${Throwable().stackTrace[1]}")
++            WakeRestart.setStoppedByUser(context, false)
+             val intent = Intent(context, WakeService::class.java)
+             ContextCompat.startForegroundService(context, intent)
+         }
+@@ -362,8 +657,17 @@ class WakeService : Service() {
              "org.stypox.dicio.io.wake.WakeService.TRIGGERED"
          private const val FOREGROUND_NOTIFICATION_ID = 19803672
          private const val START_NOTIFICATION_ID = 48019274
