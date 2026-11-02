@@ -1,5 +1,5 @@
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index f7ffad93..53a12e01 100644
+index f7ffad93..cd8dd6c3 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
 @@ -30,10 +30,10 @@ android {
@@ -11,7 +11,7 @@ index f7ffad93..53a12e01 100644
          minSdk = libs.versions.minSdk.get().toInt()
          targetSdk = libs.versions.targetSdk.get().toInt()
 -        versionCode = 19
-+        versionCode = 30
++        versionCode = 31
          versionName = "4.2"
          testInstrumentationRunner = "org.stypox.dicio.CustomTestRunner"
  
@@ -451,6 +451,180 @@ index 00000000..0d7939a9
 +            buildClaudeIntent(context) != null
 +    }
 +}
+diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/PhoneActions.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/PhoneActions.kt
+new file mode 100644
+index 00000000..14f84fb9
+--- /dev/null
++++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/PhoneActions.kt
+@@ -0,0 +1,168 @@
++package org.stypox.dicio.io.wake
++
++import android.Manifest
++import android.content.Context
++import android.content.Intent
++import android.content.pm.PackageManager
++import android.net.Uri
++import android.provider.ContactsContract
++import android.telephony.PhoneNumberUtils
++import android.util.Log
++import org.stypox.dicio.skills.telephone.Contact
++import java.net.URLEncoder
++
++/**
++ * PATCH (Dicio per Claude): voice actions that Dicio does not have as skills: WhatsApp messages
++ * and WhatsApp (video) calls. Everything is in Italian, as transcribed by the offline STT (so
++ * without punctuation), e.g.:
++ * - "scrivi a Mario su whatsapp ciao come stai", "manda un messaggio a Mario dicendo arrivo"
++ * - "chiama Mario su whatsapp", "videochiama Mario"
++ */
++object PhoneActions {
++    private const val TAG = "PhoneActions"
++    const val WHATSAPP = "com.whatsapp"
++    private const val WHATSAPP_VOICE = "vnd.android.cursor.item/vnd.com.whatsapp.voip.call"
++    private const val WHATSAPP_VIDEO = "vnd.android.cursor.item/vnd.com.whatsapp.video.call"
++
++    sealed interface Result {
++        /** Not a WhatsApp action: let Dicio's skills handle it. */
++        data object NotHandled : Result
++        /** Done; [speech] is said out loud if not null. */
++        data class Done(val speech: String?) : Result
++    }
++
++    private val WHATSAPP_WORDS = Regex("""\s*\b(?:su|con|via|tramite|in|di)\s+(?:whatsapp|whats\s*app|uozzap|uotsap)\b""")
++    private val MESSAGE_START = Regex(
++        """^(?:scrivi|scrivere|manda|mandare|invia|inviare|mandami|scrivimi)(?:\s+(?:un|il)?\s*(?:messaggio|messaggino|whatsapp|vocale))?\s+(?:a|ad|al|alla|allo)\s+(.+)$"""
++    )
++    private val TEXT_SEPARATOR = Regex(
++        """\s+(?:che\s+dice|dicendo(?:gli|le)?|con\s+scritto|scrivendo(?:gli|le)?|con\s+il\s+testo|il\s+messaggio|messaggio)\s+"""
++    )
++    private val VIDEO_CALL = Regex("""^(?:videochiama|videochiamata\s+(?:a|ad|al|alla)|fai\s+una\s+videochiamata\s+(?:a|ad|al|alla))\s+(.+)$""")
++    private val CALL_START = Regex("""^(?:chiama|chiamami|telefona(?:\s+(?:a|ad|al|alla))?)\s+(.+)$""")
++
++    fun handle(context: Context, rawText: String): Result {
++        val text = rawText.lowercase().trim()
++        val mentionsWhatsapp = text.contains("whatsapp") || text.contains("whats app")
++
++        VIDEO_CALL.find(text)?.let {
++            return whatsappCall(context, WHATSAPP_WORDS.replace(it.groupValues[1], " ").trim(), video = true)
++        }
++        if (mentionsWhatsapp) {
++            CALL_START.find(text)?.let {
++                val video = text.contains("video")
++                val who = WHATSAPP_WORDS.replace(it.groupValues[1], " ")
++                    .replace(Regex("""\b(?:in\s+)?video\b"""), " ").trim()
++                return whatsappCall(context, who, video)
++            }
++        }
++        val withoutWhatsapp = WHATSAPP_WORDS.replace(text, " ").replace(Regex("""\s+"""), " ").trim()
++        MESSAGE_START.find(withoutWhatsapp)?.let {
++            return whatsappMessage(context, it.groupValues[1].trim())
++        }
++        return Result.NotHandled
++    }
++
++    private fun hasContactsPermission(context: Context) =
++        context.checkSelfPermission(Manifest.permission.READ_CONTACTS) ==
++                PackageManager.PERMISSION_GRANTED
++
++    private fun isWhatsappInstalled(context: Context) = try {
++        context.packageManager.getPackageInfo(WHATSAPP, 0)
++        true
++    } catch (e: Exception) {
++        false
++    }
++
++    /** Splits "mario rossi ciao come stai" into the best matching contact and the message. */
++    private fun splitContactAndText(context: Context, rest: String): Pair<Contact, String>? {
++        TEXT_SEPARATOR.find(rest)?.let { sep ->
++            val name = rest.substring(0, sep.range.first).trim()
++            val message = rest.substring(sep.range.last + 1).trim()
++            val contact = Contact.getFilteredSortedContacts(context.contentResolver, name)
++                .firstOrNull() ?: return null
++            return Pair(contact, message)
++        }
++
++        val words = rest.split(' ').filter { it.isNotEmpty() }
++        val candidates = (1..minOf(3, words.size)).mapNotNull { k ->
++            Contact.getFilteredSortedContacts(
++                context.contentResolver, words.take(k).joinToString(" ")
++            ).firstOrNull()?.let { Triple(k, it, it.distance) }
++        }
++        if (candidates.isEmpty()) return null
++        val bestDistance = candidates.minOf { it.third }
++        // the shortest name that matches about as well as the best one
++        val chosen = candidates.first { it.third <= bestDistance + 2 }
++        val message = words.drop(chosen.first).joinToString(" ")
++            .replace(Regex("""^(?:che|e|di|:)\s+"""), "")
++        return Pair(chosen.second, message.trim())
++    }
++
++    private fun whatsappMessage(context: Context, rest: String): Result {
++        if (!hasContactsPermission(context)) {
++            return Result.Done("Per scrivere messaggi devo poter leggere i contatti")
++        }
++        if (!isWhatsappInstalled(context)) return Result.Done("WhatsApp non è installato")
++        val (contact, message) = splitContactAndText(context, rest)
++            ?: return Result.Done("Non ho trovato nessun contatto con questo nome")
++        val number = contact.getNumbers(context.contentResolver).firstOrNull()
++            ?: return Result.Done("${contact.name} non ha un numero di telefono")
++
++        val international = (PhoneNumberUtils.formatNumberToE164(number, "IT") ?: number)
++            .filter { it.isDigit() }
++        var url = "https://api.whatsapp.com/send?phone=$international"
++        if (message.isNotEmpty()) {
++            url += "&text=" + URLEncoder.encode(message, "UTF-8").replace("+", "%20")
++        }
++        return try {
++            context.startActivity(
++                Intent(Intent.ACTION_VIEW, Uri.parse(url))
++                    .setPackage(WHATSAPP)
++                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++            )
++            Result.Done(null)
++        } catch (e: Exception) {
++            Log.w(TAG, "Could not open WhatsApp", e)
++            Result.Done("Non riesco ad aprire WhatsApp")
++        }
++    }
++
++    private fun whatsappCall(context: Context, who: String, video: Boolean): Result {
++        if (!hasContactsPermission(context)) {
++            return Result.Done("Per chiamare su WhatsApp devo poter leggere i contatti")
++        }
++        if (!isWhatsappInstalled(context)) return Result.Done("WhatsApp non è installato")
++        val contacts = Contact.getFilteredSortedContacts(context.contentResolver, who)
++        val mimeType = if (video) WHATSAPP_VIDEO else WHATSAPP_VOICE
++
++        for (contact in contacts.take(5)) {
++            val dataId = context.contentResolver.query(
++                ContactsContract.Data.CONTENT_URI,
++                arrayOf(ContactsContract.Data._ID),
++                "${ContactsContract.Data.CONTACT_ID} = ? AND ${ContactsContract.Data.MIMETYPE} = ?",
++                arrayOf(contact.id, mimeType),
++                null
++            )?.use { c -> if (c.moveToFirst()) c.getLong(0) else null } ?: continue
++
++            return try {
++                context.startActivity(
++                    Intent(Intent.ACTION_VIEW)
++                        .setDataAndType(
++                            Uri.parse("content://com.android.contacts/data/$dataId"), mimeType
++                        )
++                        .setPackage(WHATSAPP)
++                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++                )
++                Result.Done(null)
++            } catch (e: Exception) {
++                Log.w(TAG, "Could not start WhatsApp call", e)
++                Result.Done("Non riesco a chiamare su WhatsApp")
++            }
++        }
++        return Result.Done(
++            if (contacts.isEmpty()) "Non ho trovato nessun contatto con questo nome"
++            else "${contacts[0].name} non ha WhatsApp nei contatti"
++        )
++    }
++}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeRestart.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeRestart.kt
 new file mode 100644
 index 00000000..c578f293
@@ -583,7 +757,7 @@ index 00000000..c578f293
 +    }
 +}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
-index 81e12139..78bf3ae5 100644
+index 81e12139..1ae41c95 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 @@ -35,6 +35,7 @@ import org.stypox.dicio.R
@@ -594,7 +768,16 @@ index 81e12139..78bf3ae5 100644
  import java.time.Instant
  import java.util.concurrent.atomic.AtomicBoolean
  import java.util.concurrent.atomic.AtomicReference
-@@ -86,10 +87,24 @@ class WakeService : Service() {
+@@ -54,6 +55,8 @@ class WakeService : Service() {
+     lateinit var sttInputDevice: SttInputDeviceWrapper
+     @Inject
+     lateinit var wakeDevice: WakeDeviceWrapper
++    @Inject
++    lateinit var speechOutputDevice: org.stypox.dicio.di.SpeechOutputDeviceWrapper
+ 
+     private val handler = Handler(Looper.getMainLooper())
+     private val releaseSttResourcesRunnable = Runnable {
+@@ -86,10 +89,24 @@ class WakeService : Service() {
  
      override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
          if (intent?.action == ACTION_STOP_WAKE_SERVICE) {
@@ -619,7 +802,7 @@ index 81e12139..78bf3ae5 100644
          try {
              createForegroundNotification(wakeDevice.isHeyDicio.value)
          } catch (t: Throwable) {
-@@ -116,6 +131,18 @@ class WakeService : Service() {
+@@ -116,6 +133,18 @@ class WakeService : Service() {
              }
          }
  
@@ -638,7 +821,7 @@ index 81e12139..78bf3ae5 100644
          scope.launch {
              try {
                  listenForWakeWord()
-@@ -128,7 +155,72 @@ class WakeService : Service() {
+@@ -128,7 +157,72 @@ class WakeService : Service() {
          return START_STICKY
      }
  
@@ -711,7 +894,7 @@ index 81e12139..78bf3ae5 100644
          listening.set(false)
          job.cancel()
          wakeDevice.reinitializeToReleaseResources()
-@@ -210,7 +302,14 @@ class WakeService : Service() {
+@@ -210,7 +304,14 @@ class WakeService : Service() {
                  val wakeWordDetected = wakeDevice.processFrame(audio)
                  if (wakeWordDetected && Instant.now() > nextWakeWordAllowed) {
                      nextWakeWordAllowed = Instant.now().plusMillis(WAKE_WORD_BACKOFF_MILLIS)
@@ -727,7 +910,7 @@ index 81e12139..78bf3ae5 100644
                  }
  
                  lastHeard.set(Instant.now())
-@@ -221,61 +320,356 @@ class WakeService : Service() {
+@@ -221,61 +322,384 @@ class WakeService : Service() {
          }
      }
  
@@ -761,16 +944,23 @@ index 81e12139..78bf3ae5 100644
 +        scope.launch { openClaude(wasScreenOff) }
 +        return true
 +    }
-+
+ 
+-        // Unload the STT after a while because it would be using RAM uselessly
+-        handler.removeCallbacks(releaseSttResourcesRunnable)
+-        handler.postDelayed(releaseSttResourcesRunnable, RELEASE_STT_RESOURCES_MILLIS)
 +    private var commandSession = 0
-+
+ 
+-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || MainActivity.isInForeground > 0) {
+-            // start the activity directly on versions prior to Android 10,
+-            // or if the MainActivity is already running in the foreground
+-            startActivity(intent)
 +    /** Must be called on the main thread. */
 +    private fun listenForCommand() {
 +        val session = ++commandSession
 +        var decided = false
 +        var heardSomething = false
 +        val timeouts = mutableListOf<Runnable>()
-+
+ 
 +        fun clearTimeouts() {
 +            timeouts.forEach { handler.removeCallbacks(it) }
 +            timeouts.clear()
@@ -797,7 +987,7 @@ index 81e12139..78bf3ae5 100644
 +                        val words = cleanCommand(event.utterance).split(' ').filter { it.isNotEmpty() }
 +                        if (words.isNotEmpty()) {
 +                            heardSomething = true
-+                            if (words.size >= 2 && !isCallWord(words[0])) {
++                            if (words.size >= 2 && !isActionStart(words)) {
 +                                decideClaude("not a call: ${words.joinToString(" ")}")
 +                            }
 +                        }
@@ -805,13 +995,13 @@ index 81e12139..78bf3ae5 100644
 +                    is InputEvent.Final -> {
 +                        val cleaned = event.utterances.map { Pair(cleanCommand(it.first), it.second) }
 +                        val best = cleaned.firstOrNull()?.first ?: ""
-+                        if (isCallWord(best.substringBefore(' '))) {
++                        if (isActionStart(best.split(' ').filter { it.isNotEmpty() })) {
 +                            decided = true
 +                            clearTimeouts()
-+                            Log.d(TAG, "Phone call request: $best")
-+                            // do not reopen Claude after unlocking, a call is starting
++                            Log.d(TAG, "Phone action: $best")
++                            // do not reopen Claude after unlocking, an action is being done
 +                            unregisterUnlockReceiver()
-+                            skillEvaluator.processInputEvent(InputEvent.Final(cleaned))
++                            runPhoneAction(best, cleaned)
 +                        } else {
 +                            decideClaude("final: $best")
 +                        }
@@ -821,10 +1011,7 @@ index 81e12139..78bf3ae5 100644
 +                }
 +            }
 +        }
- 
--        // Unload the STT after a while because it would be using RAM uselessly
--        handler.removeCallbacks(releaseSttResourcesRunnable)
--        handler.postDelayed(releaseSttResourcesRunnable, RELEASE_STT_RESOURCES_MILLIS)
++
 +        val started = try {
 +            sttInputDevice.tryLoad(listener)
 +        } catch (e: Exception) {
@@ -835,11 +1022,7 @@ index 81e12139..78bf3ae5 100644
 +            Log.w(TAG, "STT not available, phone calls by voice will not work")
 +            return
 +        }
- 
--        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || MainActivity.isInForeground > 0) {
--            // start the activity directly on versions prior to Android 10,
--            // or if the MainActivity is already running in the foreground
--            startActivity(intent)
++
 +        val silenceTimeout = Runnable {
 +            if (!heardSomething) decideClaude("silence after wake word")
 +        }
@@ -849,7 +1032,35 @@ index 81e12139..78bf3ae5 100644
 +        handler.postDelayed(silenceTimeout, COMMAND_SILENCE_MILLIS)
 +        handler.postDelayed(hardTimeout, COMMAND_MAX_MILLIS)
 +    }
- 
++
++    /**
++     * PATCH (Dicio per Claude): runs a voice action ("apri Instagram", "chiama Mario in vivavoce",
++     * "scrivi a Mario su whatsapp ciao"...). Must be called on the main thread. An invisible
++     * overlay is kept for a while, since it allows opening apps from the background.
++     */
++    private fun runPhoneAction(best: String, cleaned: List<Pair<String, Float>>) {
++        val overlay = showInvisibleOverlay()
++        handler.postDelayed({ removeOverlay(overlay) }, ACTION_OVERLAY_MILLIS)
++        val result = try {
++            PhoneActions.handle(this, best)
++        } catch (e: Exception) {
++            Log.e(TAG, "Phone action failed", e)
++            PhoneActions.Result.Done("Si è verificato un errore")
++        }
++        when (result) {
++            is PhoneActions.Result.Done -> result.speech?.let {
++                try {
++                    speechOutputDevice.speak(it)
++                } catch (e: Exception) {
++                    Log.w(TAG, "Could not speak", e)
++                }
++            }
++            PhoneActions.Result.NotHandled ->
++                // Dicio's own skills: telephone, open app, flashlight, timer, media...
++                skillEvaluator.processInputEvent(InputEvent.Final(cleaned))
++        }
++    }
++
 +    /** Opens Claude; blocks for a short while, must NOT be called on the main thread. */
 +    private fun openClaude(wasScreenOff: Boolean) {
 +        if (!ClaudeTrampolineActivity.isClaudeInstalled(this)) {
@@ -1030,9 +1241,7 @@ index 81e12139..78bf3ae5 100644
 +        }
 +        unlockReceiver = null
 +    }
- 
--            notificationManager.cancel(TRIGGERED_NOTIFICATION_ID)
--            notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
++
 +    /** Returns true if the screen was off (and has been turned on). */
 +    @Suppress("DEPRECATION")
 +    private fun wakeUpScreen(): Boolean {
@@ -1049,9 +1258,9 @@ index 81e12139..78bf3ae5 100644
 +        } catch (e: Exception) {
 +            Log.w(TAG, "Could not wake up the screen", e)
 +            return false
-         }
-     }
- 
++        }
++    }
++
 +    private fun showInvisibleOverlay(): android.view.View? {
 +        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
 +            !android.provider.Settings.canDrawOverlays(this)) return null
@@ -1074,16 +1283,18 @@ index 81e12139..78bf3ae5 100644
 +            null
 +        }
 +    }
-+
+ 
+-            notificationManager.cancel(TRIGGERED_NOTIFICATION_ID)
+-            notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
 +    private fun removeOverlay(view: android.view.View?) {
 +        if (view == null) return
 +        try {
 +            getSystemService(this, android.view.WindowManager::class.java)?.removeView(view)
 +        } catch (e: Exception) {
 +            Log.w(TAG, "Could not remove overlay", e)
-+        }
-+    }
-+
+         }
+     }
+ 
 +    private fun showFullScreenNotification(intent: Intent) {
 +        val channel = NotificationChannel(
 +            TRIGGERED_NOTIFICATION_CHANNEL_ID,
@@ -1124,7 +1335,7 @@ index 81e12139..78bf3ae5 100644
      companion object {
          /**
           * Starting from Android 11, it is not possible to start a foreground service
-@@ -308,10 +702,12 @@ class WakeService : Service() {
+@@ -308,10 +732,12 @@ class WakeService : Service() {
                  .setContentTitle(context.getString(R.string.wake_service_start_notification))
                  .setStyle(NotificationCompat.BigTextStyle().bigText(
                      context.getString(R.string.wake_service_start_notification_summary)))
@@ -1138,7 +1349,7 @@ index 81e12139..78bf3ae5 100644
                  .build()
  
              notificationManager.notify(START_NOTIFICATION_ID, notification)
-@@ -324,6 +720,7 @@ class WakeService : Service() {
+@@ -324,6 +750,7 @@ class WakeService : Service() {
           */
          fun start(context: Context) {
              Log.d(TAG, "WakeService.start() called from ${Throwable().stackTrace[1]}")
@@ -1146,7 +1357,7 @@ index 81e12139..78bf3ae5 100644
              val intent = Intent(context, WakeService::class.java)
              ContextCompat.startForegroundService(context, intent)
          }
-@@ -362,8 +759,36 @@ class WakeService : Service() {
+@@ -362,8 +789,55 @@ class WakeService : Service() {
              "org.stypox.dicio.io.wake.WakeService.TRIGGERED"
          private const val FOREGROUND_NOTIFICATION_ID = 19803672
          private const val START_NOTIFICATION_ID = 48019274
@@ -1161,6 +1372,7 @@ index 81e12139..78bf3ae5 100644
          private const val WAKE_WORD_BACKOFF_MILLIS = 4000L
 +        private const val MIC_PAUSE_AFTER_WAKE_MILLIS = 8000L
 +        private const val COMMAND_SILENCE_MILLIS = 2000L
++        private const val ACTION_OVERLAY_MILLIS = 10000L
 +        private const val COMMAND_MAX_MILLIS = 10000L
 +        private val LEADING_WAKE_WORDS = setOf(
 +            "hey", "ehi", "ei", "hei", "eh", "e", "ok", "claudio", "claudia", "audio", "claud"
@@ -1179,6 +1391,24 @@ index 81e12139..78bf3ae5 100644
 +        }
 +
 +        fun isCallWord(word: String): Boolean = word in CALL_WORDS
++
++        /** Words that start a voice action done by Dicio (everything else goes to Claude). */
++        private val ACTION_WORDS = CALL_WORDS + setOf(
++            "videochiama", "videochiamata",
++            "apri", "aprimi", "avvia", "lancia", "esegui",
++            "scrivi", "scrivere", "scrivimi", "manda", "mandare", "mandami", "invia", "inviare",
++            "accendi", "accendimi", "spegni", "spegnimi", "attiva", "disattiva",
++            "imposta", "timer", "metti", "riproduci", "riprendi", "pausa", "stoppa",
++            "canzone", "traccia",
++        )
++
++        fun isActionStart(words: List<String>): Boolean {
++            if (words.isEmpty()) return false
++            if (words[0] in ACTION_WORDS) return true
++            // "fai una videochiamata a Mario", "fai partire un timer"
++            return words[0] == "fai" && words.size >= 2 &&
++                    (words[1] == "partire" || words.drop(1).take(2).any { it.startsWith("videochiam") })
++        }
 +        private const val MIC_IDLE_BEFORE_RESUME_MILLIS = 15000L
 +        private const val MAX_MIC_PAUSE_MILLIS = 1000L * 60 * 10 // 10 minutes
          private const val ACTION_STOP_WAKE_SERVICE =
@@ -1206,6 +1436,19 @@ index 9027a731..c7208456 100644
      private val userWakeFileExists = userWakeFile.exists()
      private val allModelFiles =
          // wakeFile is not needed if we want to use the userWakeFile instead
+diff --git a/app/src/main/kotlin/org/stypox/dicio/skills/telephone/Contact.kt b/app/src/main/kotlin/org/stypox/dicio/skills/telephone/Contact.kt
+index 9d8b83b0..5d8dfad3 100644
+--- a/app/src/main/kotlin/org/stypox/dicio/skills/telephone/Contact.kt
++++ b/app/src/main/kotlin/org/stypox/dicio/skills/telephone/Contact.kt
+@@ -6,7 +6,7 @@ import android.util.Log
+ import org.stypox.dicio.util.StringUtils
+ import java.util.regex.Pattern
+ 
+-class Contact(val name: String, val distance: Int, private val id: String) {
++class Contact(val name: String, val distance: Int, val id: String) {
+     fun getNumbers(contentResolver: ContentResolver): List<String> {
+         val numbers: MutableList<String> = ArrayList()
+         try {
 diff --git a/app/src/main/kotlin/org/stypox/dicio/skills/telephone/ContactChooserIndex.kt b/app/src/main/kotlin/org/stypox/dicio/skills/telephone/ContactChooserIndex.kt
 index 31d787cb..d5ba4cca 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/skills/telephone/ContactChooserIndex.kt
