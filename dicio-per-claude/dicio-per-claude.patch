@@ -1,5 +1,5 @@
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index f7ffad93..aaff078c 100644
+index f7ffad93..bcb615b0 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
 @@ -30,10 +30,10 @@ android {
@@ -11,7 +11,7 @@ index f7ffad93..aaff078c 100644
          minSdk = libs.versions.minSdk.get().toInt()
          targetSdk = libs.versions.targetSdk.get().toInt()
 -        versionCode = 19
-+        versionCode = 26
++        versionCode = 27
          versionName = "4.2"
          testInstrumentationRunner = "org.stypox.dicio.CustomTestRunner"
  
@@ -42,10 +42,10 @@ index f7ffad93..aaff078c 100644
      coreLibraryDesugaring(libs.desugar.jdk.libs)
  
 diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
-index c66e4da0..036af089 100644
+index c66e4da0..8cdc31a9 100644
 --- a/app/src/main/AndroidManifest.xml
 +++ b/app/src/main/AndroidManifest.xml
-@@ -10,7 +10,12 @@
+@@ -10,7 +10,13 @@
      <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
      <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
      <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
@@ -54,12 +54,13 @@ index c66e4da0..036af089 100644
 +    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 +    <!-- Dicio per Claude: wake up the screen and keep listening with the screen off -->
 +    <uses-permission android:name="android.permission.WAKE_LOCK" />
++    <uses-permission android:name="android.permission.VIBRATE" />
 +    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 +    <!-- Dicio per Claude: BIND_NOTIFICATION_LISTENER_SERVICE removed, Play Protect blocks sideloaded apps that use it -->
  
      <!-- required by the download manager for APIs < Q -->
      <uses-permission
-@@ -42,6 +47,7 @@
+@@ -42,6 +48,7 @@
          <activity
              android:name=".MainActivity"
              android:exported="true"
@@ -67,7 +68,7 @@ index c66e4da0..036af089 100644
              android:windowSoftInputMode="adjustResize"
              android:launchMode="singleTop"
              android:showOnLockScreen="true">
-@@ -66,6 +72,18 @@
+@@ -66,6 +73,18 @@
                  android:resource="@xml/shortcuts" />
          </activity>
  
@@ -86,7 +87,7 @@ index c66e4da0..036af089 100644
          <activity
              android:name=".error.ErrorActivity"
              android:exported="false" />
-@@ -102,16 +120,6 @@
+@@ -102,16 +121,6 @@
                  android:resource="@xml/stt_service_metadata" />
          </service>
  
@@ -381,7 +382,7 @@ index 00000000..0d7939a9
 +    }
 +}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
-index 81e12139..79cda50a 100644
+index 81e12139..7e61471a 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 @@ -129,6 +129,7 @@ class WakeService : Service() {
@@ -392,7 +393,7 @@ index 81e12139..79cda50a 100644
          listening.set(false)
          job.cancel()
          wakeDevice.reinitializeToReleaseResources()
-@@ -210,7 +211,19 @@ class WakeService : Service() {
+@@ -210,7 +211,14 @@ class WakeService : Service() {
                  val wakeWordDetected = wakeDevice.processFrame(audio)
                  if (wakeWordDetected && Instant.now() > nextWakeWordAllowed) {
                      nextWakeWordAllowed = Instant.now().plusMillis(WAKE_WORD_BACKOFF_MILLIS)
@@ -400,12 +401,7 @@ index 81e12139..79cda50a 100644
 +                    if (!onWakeWordDetected()) continue
 +                    // PATCH (Dicio per Claude): free the microphone so Claude can listen
 +                    ar.stop()
-+                    if (micPausedUntil.isBefore(Instant.now().plusMillis(MIC_PAUSE_AFTER_WAKE_MILLIS))) {
-+                        micPausedUntil = Instant.now().plusMillis(MIC_PAUSE_AFTER_WAKE_MILLIS)
-+                    }
-+                    while (listening.get() && Instant.now() < micPausedUntil) {
-+                        Thread.sleep(200)
-+                    }
++                    waitForClaudeConversationToEnd()
 +                    if (!listening.get()) break
 +                    ar.startRecording()
 +                    nextWakeWordAllowed = Instant.now().plusMillis(WAKE_WORD_BACKOFF_MILLIS)
@@ -413,12 +409,16 @@ index 81e12139..79cda50a 100644
                  }
  
                  lastHeard.set(Instant.now())
-@@ -221,59 +234,201 @@ class WakeService : Service() {
+@@ -221,61 +229,263 @@ class WakeService : Service() {
          }
      }
  
 -    private fun onWakeWordDetected() {
 -        Log.d(TAG, "Wake word detected")
+-
+-        val intent = Intent(this, MainActivity::class.java)
+-        intent.setAction(ACTION_WAKE_WORD)
+-        intent.setFlags(FLAG_ACTIVITY_NEW_TASK)
 +    /**
 +     * PATCH (Dicio per Claude): instead of opening Dicio, the wake word opens Claude through
 +     * [ClaudeTrampolineActivity], which also works with the screen off and over the lock screen.
@@ -437,9 +437,10 @@ index 81e12139..79cda50a 100644
 +            return false
 +        }
  
--        val intent = Intent(this, MainActivity::class.java)
--        intent.setAction(ACTION_WAKE_WORD)
--        intent.setFlags(FLAG_ACTIVITY_NEW_TASK)
+-        // Start listening and pass STT events to the skill evaluator.
+-        // Note that this works even if the MainActivity is opened later!
+-        sttInputDevice.tryLoad(skillEvaluator::processInputEvent)
++        vibrateHeard()
 +        val wasScreenOff = wakeUpScreen()
 +
 +        // Preferred way: show Claude's assistant panel, exactly like a long press of the power
@@ -466,9 +467,9 @@ index 81e12139..79cda50a 100644
 +            showToast("Imposta Claude come assistente digitale predefinito")
 +        }
  
--        // Start listening and pass STT events to the skill evaluator.
--        // Note that this works even if the MainActivity is opened later!
--        sttInputDevice.tryLoad(skillEvaluator::processInputEvent)
+-        // Unload the STT after a while because it would be using RAM uselessly
+-        handler.removeCallbacks(releaseSttResourcesRunnable)
+-        handler.postDelayed(releaseSttResourcesRunnable, RELEASE_STT_RESOURCES_MILLIS)
 +        val intent = Intent(this, ClaudeTrampolineActivity::class.java)
 +            .addFlags(FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
 +
@@ -493,11 +494,80 @@ index 81e12139..79cda50a 100644
 +        return true
 +    }
  
--        // Unload the STT after a while because it would be using RAM uselessly
--        handler.removeCallbacks(releaseSttResourcesRunnable)
--        handler.postDelayed(releaseSttResourcesRunnable, RELEASE_STT_RESOURCES_MILLIS)
+-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || MainActivity.isInForeground > 0) {
+-            // start the activity directly on versions prior to Android 10,
+-            // or if the MainActivity is already running in the foreground
+-            startActivity(intent)
 +    @Volatile
 +    private var micPausedUntil: Instant = Instant.MIN
++
++    /**
++     * PATCH (Dicio per Claude): keeps the microphone free for the whole conversation with Claude.
++     * Waits at least until [micPausedUntil], then until no other app has been recording audio (or
++     * been in a voice call/communication) for [MIC_IDLE_BEFORE_RESUME_MILLIS].
++     */
++    private fun waitForClaudeConversationToEnd() {
++        val pausedAt = Instant.now()
++        val minResume = pausedAt.plusMillis(MIC_PAUSE_AFTER_WAKE_MILLIS)
++        if (micPausedUntil.isBefore(minResume)) micPausedUntil = minResume
++        var lastBusy = pausedAt
++        while (listening.get()) {
++            val now = Instant.now()
++            if (isMicrophoneBusy()) lastBusy = now
++            if (now >= micPausedUntil &&
++                now >= lastBusy.plusMillis(MIC_IDLE_BEFORE_RESUME_MILLIS)) break
++            if (now >= pausedAt.plusMillis(MAX_MIC_PAUSE_MILLIS)) break
++            Thread.sleep(500)
++        }
++    }
+ 
+-        } else {
+-            // Android 10+ does not allow starting activities from the background,
+-            // so show a full-screen notification instead, which does actually result in starting
+-            // the activity from the background if the phone is off and Do Not Disturb is not active
+-            // Maybe we could also use the "Display over other apps" permission?
++    private fun isMicrophoneBusy(): Boolean {
++        return try {
++            val am = getSystemService(this, android.media.AudioManager::class.java) ?: return false
++            if (am.mode == android.media.AudioManager.MODE_IN_COMMUNICATION ||
++                am.mode == android.media.AudioManager.MODE_IN_CALL) return true
++            Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
++                    am.activeRecordingConfigurations.isNotEmpty()
++        } catch (e: Exception) {
++            false
++        }
++    }
+ 
+-            val channel = NotificationChannel(
+-                TRIGGERED_NOTIFICATION_CHANNEL_ID,
+-                getString(R.string.wake_service_triggered_notification),
+-                NotificationManager.IMPORTANCE_HIGH
++    /** PATCH (Dicio per Claude): short vibration to confirm that "Hey Claudio" was heard. */
++    @Suppress("DEPRECATION")
++    private fun vibrateHeard() {
++        try {
++            val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
++                getSystemService(this, android.os.VibratorManager::class.java)?.defaultVibrator
++            } else {
++                getSystemService(this, android.os.Vibrator::class.java)
++            } ?: return
++            if (!vibrator.hasVibrator()) return
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
++                val effect = android.os.VibrationEffect.createWaveform(longArrayOf(0, 60, 80, 60), -1)
++                if (Build.VERSION.SDK_INT >= 33) {
++                    vibrator.vibrate(effect, android.os.VibrationAttributes.createForUsage(
++                        android.os.VibrationAttributes.USAGE_ALARM))
++                } else {
++                    vibrator.vibrate(effect, android.media.AudioAttributes.Builder()
++                        .setUsage(android.media.AudioAttributes.USAGE_ALARM).build())
++                }
++            } else {
++                vibrator.vibrate(longArrayOf(0, 60, 80, 60), -1)
++            }
++        } catch (e: Exception) {
++            Log.w(TAG, "Could not vibrate", e)
++        }
++    }
 +    private var unlockReceiver: android.content.BroadcastReceiver? = null
 +    private val unlockTimeoutRunnable = Runnable { unregisterUnlockReceiver() }
 +
@@ -517,7 +587,9 @@ index 81e12139..79cda50a 100644
 +            ContextCompat.registerReceiver(
 +                this, receiver, android.content.IntentFilter(Intent.ACTION_USER_PRESENT),
 +                ContextCompat.RECEIVER_EXPORTED
-+            )
+             )
+-            channel.description = getString(R.string.wake_service_triggered_notification_summary)
+-            notificationManager.createNotificationChannel(channel)
 +            unlockReceiver = receiver
 +            handler.postDelayed(unlockTimeoutRunnable, UNLOCK_WAIT_MILLIS)
 +        } catch (e: Exception) {
@@ -525,10 +597,12 @@ index 81e12139..79cda50a 100644
 +        }
 +    }
  
--        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || MainActivity.isInForeground > 0) {
--            // start the activity directly on versions prior to Android 10,
--            // or if the MainActivity is already running in the foreground
--            startActivity(intent)
+-            val pendingIntent = PendingIntent.getActivity(
+-                this,
+-                0,
+-                intent,
+-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+-            )
 +    private fun unregisterUnlockReceiver() {
 +        handler.removeCallbacks(unlockTimeoutRunnable)
 +        unlockReceiver?.let {
@@ -541,11 +615,14 @@ index 81e12139..79cda50a 100644
 +        unlockReceiver = null
 +    }
  
--        } else {
--            // Android 10+ does not allow starting activities from the background,
--            // so show a full-screen notification instead, which does actually result in starting
--            // the activity from the background if the phone is off and Do Not Disturb is not active
--            // Maybe we could also use the "Display over other apps" permission?
+-            val notification = NotificationCompat.Builder(this, TRIGGERED_NOTIFICATION_CHANNEL_ID)
+-                .setSmallIcon(R.drawable.ic_hearing_white)
+-                .setContentTitle(getString(R.string.wake_service_triggered_notification))
+-                .setStyle(NotificationCompat.BigTextStyle().bigText(
+-                    getString(R.string.wake_service_triggered_notification_summary)))
+-                .setPriority(NotificationCompat.PRIORITY_HIGH)
+-                .setFullScreenIntent(pendingIntent, true)
+-                .build()
 +    /** Returns true if the screen was off (and has been turned on). */
 +    @Suppress("DEPRECATION")
 +    private fun wakeUpScreen(): Boolean {
@@ -564,11 +641,7 @@ index 81e12139..79cda50a 100644
 +            return false
 +        }
 +    }
- 
--            val channel = NotificationChannel(
--                TRIGGERED_NOTIFICATION_CHANNEL_ID,
--                getString(R.string.wake_service_triggered_notification),
--                NotificationManager.IMPORTANCE_HIGH
++
 +    private fun showInvisibleOverlay(): android.view.View? {
 +        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
 +            !android.provider.Settings.canDrawOverlays(this)) return null
@@ -582,9 +655,7 @@ index 81e12139..79cda50a 100644
 +                        android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
 +                        android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
 +                android.graphics.PixelFormat.TRANSLUCENT
-             )
--            channel.description = getString(R.string.wake_service_triggered_notification_summary)
--            notificationManager.createNotificationChannel(channel)
++            )
 +            params.gravity = android.view.Gravity.TOP or android.view.Gravity.START
 +            wm.addView(view, params)
 +            view
@@ -594,29 +665,17 @@ index 81e12139..79cda50a 100644
 +        }
 +    }
  
--            val pendingIntent = PendingIntent.getActivity(
--                this,
--                0,
--                intent,
--                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
--            )
+-            notificationManager.cancel(TRIGGERED_NOTIFICATION_ID)
+-            notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
 +    private fun removeOverlay(view: android.view.View?) {
 +        if (view == null) return
 +        try {
 +            getSystemService(this, android.view.WindowManager::class.java)?.removeView(view)
 +        } catch (e: Exception) {
 +            Log.w(TAG, "Could not remove overlay", e)
-+        }
-+    }
+         }
+     }
  
--            val notification = NotificationCompat.Builder(this, TRIGGERED_NOTIFICATION_CHANNEL_ID)
--                .setSmallIcon(R.drawable.ic_hearing_white)
--                .setContentTitle(getString(R.string.wake_service_triggered_notification))
--                .setStyle(NotificationCompat.BigTextStyle().bigText(
--                    getString(R.string.wake_service_triggered_notification_summary)))
--                .setPriority(NotificationCompat.PRIORITY_HIGH)
--                .setFullScreenIntent(pendingIntent, true)
--                .build()
 +    private fun showFullScreenNotification(intent: Intent) {
 +        val channel = NotificationChannel(
 +            TRIGGERED_NOTIFICATION_CHANNEL_ID,
@@ -632,10 +691,7 @@ index 81e12139..79cda50a 100644
 +            intent,
 +            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
 +        )
- 
--            notificationManager.cancel(TRIGGERED_NOTIFICATION_ID)
--            notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
--        }
++
 +        val notification = NotificationCompat.Builder(this, TRIGGERED_NOTIFICATION_CHANNEL_ID)
 +            .setSmallIcon(R.drawable.ic_hearing_white)
 +            .setContentTitle("Hey Claudio")
@@ -655,10 +711,12 @@ index 81e12139..79cda50a 100644
 +
 +    private fun showToast(text: String) {
 +        handler.post { android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_SHORT).show() }
-     }
- 
++    }
++
      companion object {
-@@ -308,10 +463,12 @@ class WakeService : Service() {
+         /**
+          * Starting from Android 11, it is not possible to start a foreground service
+@@ -308,10 +518,12 @@ class WakeService : Service() {
                  .setContentTitle(context.getString(R.string.wake_service_start_notification))
                  .setStyle(NotificationCompat.BigTextStyle().bigText(
                      context.getString(R.string.wake_service_start_notification_summary)))
@@ -672,7 +730,7 @@ index 81e12139..79cda50a 100644
                  .build()
  
              notificationManager.notify(START_NOTIFICATION_ID, notification)
-@@ -362,8 +519,15 @@ class WakeService : Service() {
+@@ -362,8 +574,17 @@ class WakeService : Service() {
              "org.stypox.dicio.io.wake.WakeService.TRIGGERED"
          private const val FOREGROUND_NOTIFICATION_ID = 19803672
          private const val START_NOTIFICATION_ID = 48019274
@@ -685,7 +743,9 @@ index 81e12139..79cda50a 100644
 +        private const val AFTER_UNLOCK_DELAY_MILLIS = 400L
 +        private const val TRIGGERED_NOTIFICATION_TIMEOUT_MILLIS = 30000L
          private const val WAKE_WORD_BACKOFF_MILLIS = 4000L
-+        private const val MIC_PAUSE_AFTER_WAKE_MILLIS = 20000L
++        private const val MIC_PAUSE_AFTER_WAKE_MILLIS = 8000L
++        private const val MIC_IDLE_BEFORE_RESUME_MILLIS = 15000L
++        private const val MAX_MIC_PAUSE_MILLIS = 1000L * 60 * 10 // 10 minutes
          private const val ACTION_STOP_WAKE_SERVICE =
              "org.stypox.dicio.io.wake.WakeService.ACTION_STOP"
          private const val RELEASE_STT_RESOURCES_MILLIS = 1000L * 60 * 5 // 5 minutes
