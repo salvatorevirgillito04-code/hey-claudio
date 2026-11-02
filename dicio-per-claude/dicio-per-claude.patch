@@ -1,5 +1,5 @@
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index f7ffad93..62073f31 100644
+index f7ffad93..53a12e01 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
 @@ -30,10 +30,10 @@ android {
@@ -11,7 +11,7 @@ index f7ffad93..62073f31 100644
          minSdk = libs.versions.minSdk.get().toInt()
          targetSdk = libs.versions.targetSdk.get().toInt()
 -        versionCode = 19
-+        versionCode = 29
++        versionCode = 30
          versionName = "4.2"
          testInstrumentationRunner = "org.stypox.dicio.CustomTestRunner"
  
@@ -583,7 +583,7 @@ index 00000000..c578f293
 +    }
 +}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
-index 81e12139..97cfb108 100644
+index 81e12139..78bf3ae5 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 @@ -35,6 +35,7 @@ import org.stypox.dicio.R
@@ -727,7 +727,7 @@ index 81e12139..97cfb108 100644
                  }
  
                  lastHeard.set(Instant.now())
-@@ -221,61 +320,352 @@ class WakeService : Service() {
+@@ -221,61 +320,356 @@ class WakeService : Service() {
          }
      }
  
@@ -753,17 +753,19 @@ index 81e12139..97cfb108 100644
 -        // Start listening and pass STT events to the skill evaluator.
 -        // Note that this works even if the MainActivity is opened later!
 -        sttInputDevice.tryLoad(skillEvaluator::processInputEvent)
-+        // PATCH (Dicio per Claude): listen to what comes after "Hey Claudio": phone calls are
-+        // handled by Dicio's telephone skill, everything else goes to Claude
++        // PATCH (Dicio per Claude): Claude always opens right away (voice assistant), while Dicio
++        // listens to the same sentence: if it is a phone call request ("chiama Mario in
++        // vivavoce") Dicio's telephone skill places the call, which comes on top of Claude.
 +        micPausedUntil = Instant.now().plusMillis(COMMAND_MAX_MILLIS)
-+        handler.post { listenForCommand(wasScreenOff) }
++        handler.post { listenForCommand() }
++        scope.launch { openClaude(wasScreenOff) }
 +        return true
 +    }
 +
 +    private var commandSession = 0
 +
 +    /** Must be called on the main thread. */
-+    private fun listenForCommand(wasScreenOff: Boolean) {
++    private fun listenForCommand() {
 +        val session = ++commandSession
 +        var decided = false
 +        var heardSomething = false
@@ -774,17 +776,17 @@ index 81e12139..97cfb108 100644
 +            timeouts.clear()
 +        }
 +
++        // not a phone call: stop listening, so that the microphone is all Claude's
 +        fun decideClaude(reason: String) {
 +            if (decided || session != commandSession) return
 +            decided = true
 +            clearTimeouts()
-+            Log.d(TAG, "Opening Claude: $reason")
++            Log.d(TAG, "Not a phone call, leaving it to Claude: $reason")
 +            try {
 +                sttInputDevice.stopListening()
 +            } catch (e: Exception) {
 +                Log.w(TAG, "Could not stop STT", e)
 +            }
-+            scope.launch { openClaude(wasScreenOff) }
 +        }
 +
 +        val listener: (InputEvent) -> Unit = { event ->
@@ -807,6 +809,8 @@ index 81e12139..97cfb108 100644
 +                            decided = true
 +                            clearTimeouts()
 +                            Log.d(TAG, "Phone call request: $best")
++                            // do not reopen Claude after unlocking, a call is starting
++                            unregisterUnlockReceiver()
 +                            skillEvaluator.processInputEvent(InputEvent.Final(cleaned))
 +                        } else {
 +                            decideClaude("final: $best")
@@ -828,7 +832,7 @@ index 81e12139..97cfb108 100644
 +            false
 +        }
 +        if (!started) {
-+            decideClaude("STT not available")
++            Log.w(TAG, "STT not available, phone calls by voice will not work")
 +            return
 +        }
  
@@ -1120,7 +1124,7 @@ index 81e12139..97cfb108 100644
      companion object {
          /**
           * Starting from Android 11, it is not possible to start a foreground service
-@@ -308,10 +698,12 @@ class WakeService : Service() {
+@@ -308,10 +702,12 @@ class WakeService : Service() {
                  .setContentTitle(context.getString(R.string.wake_service_start_notification))
                  .setStyle(NotificationCompat.BigTextStyle().bigText(
                      context.getString(R.string.wake_service_start_notification_summary)))
@@ -1134,7 +1138,7 @@ index 81e12139..97cfb108 100644
                  .build()
  
              notificationManager.notify(START_NOTIFICATION_ID, notification)
-@@ -324,6 +716,7 @@ class WakeService : Service() {
+@@ -324,6 +720,7 @@ class WakeService : Service() {
           */
          fun start(context: Context) {
              Log.d(TAG, "WakeService.start() called from ${Throwable().stackTrace[1]}")
@@ -1142,7 +1146,7 @@ index 81e12139..97cfb108 100644
              val intent = Intent(context, WakeService::class.java)
              ContextCompat.startForegroundService(context, intent)
          }
-@@ -362,8 +755,36 @@ class WakeService : Service() {
+@@ -362,8 +759,36 @@ class WakeService : Service() {
              "org.stypox.dicio.io.wake.WakeService.TRIGGERED"
          private const val FOREGROUND_NOTIFICATION_ID = 19803672
          private const val START_NOTIFICATION_ID = 48019274
