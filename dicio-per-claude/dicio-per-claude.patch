@@ -1,5 +1,5 @@
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index f7ffad93..efd58534 100644
+index f7ffad93..82a21de3 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
 @@ -30,10 +30,10 @@ android {
@@ -11,7 +11,7 @@ index f7ffad93..efd58534 100644
          minSdk = libs.versions.minSdk.get().toInt()
          targetSdk = libs.versions.targetSdk.get().toInt()
 -        versionCode = 19
-+        versionCode = 37
++        versionCode = 38
          versionName = "4.2"
          testInstrumentationRunner = "org.stypox.dicio.CustomTestRunner"
  
@@ -834,10 +834,10 @@ index 00000000..ce9fbdab
 +}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/PhoneActions.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/PhoneActions.kt
 new file mode 100644
-index 00000000..e3251864
+index 00000000..d5c89f93
 --- /dev/null
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/PhoneActions.kt
-@@ -0,0 +1,326 @@
+@@ -0,0 +1,355 @@
 +package org.stypox.dicio.io.wake
 +
 +import android.Manifest
@@ -849,7 +849,6 @@ index 00000000..e3251864
 +import android.provider.ContactsContract
 +import android.telephony.PhoneNumberUtils
 +import android.util.Log
-+import org.stypox.dicio.skills.telephone.Contact
 +import org.stypox.dicio.skills.telephone.TelephoneSkill
 +import java.net.URLEncoder
 +
@@ -874,9 +873,11 @@ index 00000000..e3251864
 +        data class Done(val speech: String?, val info: String? = null) : Result
 +    }
 +
-+    private val WHATSAPP_WORDS = Regex("""\s*\b(?:su|con|via|tramite|in|di)\s+(?:whatsapp|whats\s*app|uozzap|uotsap)\b""")
++    private val WHATSAPP_WORDS = Regex(
++        """\s*\b(?:(?:su|con|via|tramite|in|di|per|da)\s+)?(?:whatsapp\s+business|wa\s+business|whatsapp|whats\s*app|uozzap|uotsap|wa)\b"""
++    )
 +    private val MESSAGE_START = Regex(
-+        """^(?:scrivi|scrivere|manda|mandare|invia|inviare|mandami|scrivimi)(?:\s+(?:un|il|questo|questa|sto)?\s*(?:messaggio|messaggino|whatsapp|vocale))?\s+(?:a|ad|al|alla|allo)\s+(.+)$"""
++        """^(?:scrivi|scrivere|manda|mandare|invia|inviare|mandami|scrivimi|mandagli|scrivigli|mandale|scrivile)(?:\s+(?:un|il|questo|questa|sto|uno)?\s*(?:messaggio|messaggino|vocale|sms)|\s+un)?\s+(?:a|ad|al|alla|allo|per)\s+(.+)$"""
 +    )
 +    private val TEXT_SEPARATOR = Regex(
 +        """\s+(?:che\s+dice|dicendo(?:gli|le)?|con\s+scritto|scrivendo(?:gli|le)?|con\s+il\s+testo|il\s+messaggio|messaggio)\s+"""
@@ -887,7 +888,12 @@ index 00000000..e3251864
 +    private val AUTO_SEND_SUFFIX = Regex("""\s+(?:e\s+)?(?:invia(?:lo|la)?|mandalo|mandala|spedisci(?:lo)?|invio)\s*$""")
 +
 +    fun handle(context: Context, rawText: String): Result {
-+        val text = rawText.lowercase().trim()
++        // the phone's recognizer adds punctuation ("a Mitch: ciao, come stai?"): parse a version
++        // without it, but keep the original words for the text of messages
++        val originalWords = rawText.trim().split(Regex("""\s+"""))
++            .filter { w -> w.any { it.isLetterOrDigit() } }
++        val text = originalWords
++            .joinToString(" ") { it.lowercase().replace(Regex("""[^\p{L}\p{N}']"""), "") }
 +
 +        Alarms.parse(text)?.let { return setAlarm(context, it) }
 +        Navigation.parse(text)?.let { return navigate(context, it) }
@@ -907,9 +913,11 @@ index 00000000..e3251864
 +        val withoutWhatsapp = WHATSAPP_WORDS.replace(text, " ").replace(Regex("""\s+"""), " ").trim()
 +        MESSAGE_START.find(withoutWhatsapp)?.let {
 +            var rest = it.groupValues[1].trim()
-+            val autoSend = AUTO_SEND_SUFFIX.containsMatchIn(rest)
++            val suffix = AUTO_SEND_SUFFIX.find(rest)
++            val autoSend = suffix != null
++            val suffixWords = suffix?.value?.trim()?.split(' ')?.count { w -> w.isNotEmpty() } ?: 0
 +            rest = AUTO_SEND_SUFFIX.replace(rest, "").trim()
-+            return whatsappMessage(context, rest, autoSend)
++            return whatsappMessage(context, rest, autoSend, originalWords.dropLast(suffixWords))
 +        }
 +        PHONE_CALL.find(text)?.let { return phoneCall(context, it.groupValues[1].trim()) }
 +        OPEN_APP.find(text)?.let { return openApp(context, it.groupValues[1].trim()) }
@@ -1003,7 +1011,7 @@ index 00000000..e3251864
 +            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 +            ?: return Result.Done("Non riesco ad aprire ${app.first}")
 +        return try {
-+            context.startActivity(intent)
++            WhatsAppSendService.launch(context, intent)
 +            Result.Done(null, "Apro ${app.first}")
 +        } catch (e: Exception) {
 +            Log.w(TAG, "Could not open ${app.second}", e)
@@ -1026,40 +1034,57 @@ index 00000000..e3251864
 +            }
 +        }
 +
-+    /** Splits "mario rossi ciao come stai" into the best matching contact and the message. */
-+    private fun splitContactAndText(context: Context, rest: String): Pair<Contact, String>? {
++    /**
++     * Splits "mario rossi ciao come stai" into the best matching contact and the number of words
++     * of the message (the message is always at the end).
++     */
++    private fun splitContactAndText(context: Context, rest: String): Pair<NamedContact, Int>? {
++        val contacts = allContacts(context)
++        if (contacts.isEmpty()) return null
++        fun bestFor(name: String) = contacts
++            .map { Pair(it, Fuzzy.similarity(name, it.name)) }
++            .maxByOrNull { it.second }
++
 +        TEXT_SEPARATOR.find(rest)?.let { sep ->
 +            val name = rest.substring(0, sep.range.first).trim()
 +            val message = rest.substring(sep.range.last + 1).trim()
-+            val contact = Contact.getFilteredSortedContacts(context.contentResolver, name)
-+                .firstOrNull() ?: return null
-+            return Pair(contact, message)
++            val best = bestFor(name)?.takeIf { it.second >= 0.45 } ?: return null
++            return Pair(best.first, message.split(' ').count { it.isNotEmpty() })
 +        }
 +
 +        val words = rest.split(' ').filter { it.isNotEmpty() }
-+        val candidates = (1..minOf(3, words.size)).mapNotNull { k ->
-+            Contact.getFilteredSortedContacts(
-+                context.contentResolver, words.take(k).joinToString(" ")
-+            ).firstOrNull()?.let { Triple(k, it, it.distance) }
++        var chosen: Triple<Int, NamedContact, Double>? = null
++        for (k in 1..minOf(3, words.size)) {
++            val best = bestFor(words.take(k).joinToString(" ")) ?: continue
++            // a longer name only if it matches clearly better
++            if (chosen == null || best.second > chosen.third + 0.05) {
++                chosen = Triple(k, best.first, best.second)
++            }
 +        }
-+        if (candidates.isEmpty()) return null
-+        val bestDistance = candidates.minOf { it.third }
-+        // the shortest name that matches about as well as the best one
-+        val chosen = candidates.first { it.third <= bestDistance + 2 }
-+        val message = words.drop(chosen.first).joinToString(" ")
-+            .replace(Regex("""^(?:che|e|di|:)\s+"""), "")
-+        return Pair(chosen.second, message.trim())
++        if (chosen == null || chosen.third < 0.5) return null
++        var messageWords = words.drop(chosen.first)
++        if (messageWords.firstOrNull() in setOf("che", "di", "e", "dicendo", "dicendogli")) {
++            messageWords = messageWords.drop(1)
++        }
++        return Pair(chosen.second, messageWords.size)
 +    }
 +
-+    private fun whatsappMessage(context: Context, rest: String, autoSend: Boolean): Result {
++    private fun whatsappMessage(
++        context: Context,
++        rest: String,
++        autoSend: Boolean,
++        originalWords: List<String>,
++    ): Result {
 +        if (!hasContactsPermission(context)) {
 +            return Result.Done("Per scrivere messaggi devo poter leggere i contatti")
 +        }
 +        val waPackage = whatsappPackage(context) ?: return Result.Done("WhatsApp non è installato")
-+        val (contact, message) = splitContactAndText(context, rest)
++        val (contact, messageWordCount) = splitContactAndText(context, rest)
 +            ?: return Result.Done("Non ho trovato nessun contatto con questo nome")
-+        val number = contact.getNumbers(context.contentResolver).firstOrNull()
++        val number = numbersOf(context, contact.id).firstOrNull()
 +            ?: return Result.Done("${contact.name} non ha un numero di telefono")
++        val message = originalWords.takeLast(messageWordCount).joinToString(" ")
++            .trimEnd(',', ';', ':').replaceFirstChar { it.uppercase() }
 +
 +        val international = (PhoneNumberUtils.formatNumberToE164(number, "IT") ?: number)
 +            .filter { it.isDigit() }
@@ -1077,12 +1102,12 @@ index 00000000..e3251864
 +            }
 +        }
 +        return try {
-+            context.startActivity(
++            WhatsAppSendService.launch(context, 
 +                Intent(Intent.ACTION_VIEW, Uri.parse(url))
 +                    .setPackage(waPackage)
 +                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 +            )
-+            Result.Done(speech)
++            Result.Done(speech, "Scrivo a ${contact.name}: «$message»" + if (autoSend) " e invio" else "")
 +        } catch (e: Exception) {
 +            Log.w(TAG, "Could not open WhatsApp", e)
 +            Result.Done("Non riesco ad aprire WhatsApp")
@@ -1097,7 +1122,7 @@ index 00000000..e3251864
 +            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 +        if (alarm.label != null) intent.putExtra(AlarmClock.EXTRA_MESSAGE, alarm.label)
 +        return try {
-+            context.startActivity(intent)
++            WhatsAppSendService.launch(context, intent)
 +            Result.Done("Sveglia impostata alle ${alarm.hour} e ${"%02d".format(alarm.minute)}")
 +        } catch (e: Exception) {
 +            Log.w(TAG, "Could not set alarm", e)
@@ -1110,11 +1135,11 @@ index 00000000..e3251864
 +            .setPackage("com.google.android.apps.maps")
 +            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 +        return try {
-+            context.startActivity(maps)
++            WhatsAppSendService.launch(context, maps)
 +            Result.Done(null)
 +        } catch (e: Exception) {
 +            try {
-+                context.startActivity(
++                WhatsAppSendService.launch(context, 
 +                    Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=" + Uri.encode(destination)))
 +                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 +                )
@@ -1131,7 +1156,11 @@ index 00000000..e3251864
 +            return Result.Done("Per chiamare su WhatsApp devo poter leggere i contatti")
 +        }
 +        val waPackage = whatsappPackage(context) ?: return Result.Done("WhatsApp non è installato")
-+        val contacts = Contact.getFilteredSortedContacts(context.contentResolver, who)
++        val contacts = allContacts(context)
++            .map { Pair(it, Fuzzy.similarity(who, it.name)) }
++            .filter { it.second >= 0.45 }
++            .sortedByDescending { it.second }
++            .map { it.first }
 +        val mimeType = if (video) videoMime(waPackage) else voiceMime(waPackage)
 +
 +        for (contact in contacts.take(5)) {
@@ -1144,7 +1173,7 @@ index 00000000..e3251864
 +            )?.use { c -> if (c.moveToFirst()) c.getLong(0) else null } ?: continue
 +
 +            return try {
-+                context.startActivity(
++                WhatsAppSendService.launch(context, 
 +                    Intent(Intent.ACTION_VIEW)
 +                        .setDataAndType(
 +                            Uri.parse("content://com.android.contacts/data/$dataId"), mimeType
@@ -1296,7 +1325,7 @@ index 00000000..c578f293
 +    }
 +}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
-index 81e12139..d2596ed6 100644
+index 81e12139..55f1661f 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 @@ -35,6 +35,7 @@ import org.stypox.dicio.R
@@ -1449,7 +1478,7 @@ index 81e12139..d2596ed6 100644
                  }
  
                  lastHeard.set(Instant.now())
-@@ -221,61 +322,449 @@ class WakeService : Service() {
+@@ -221,61 +322,451 @@ class WakeService : Service() {
          }
      }
  
@@ -1485,23 +1514,13 @@ index 81e12139..d2596ed6 100644
 +
 +    private var commandSession = 0
 +    private val commandRecognizer by lazy { AndroidCommandRecognizer(this) }
- 
--        // Start listening and pass STT events to the skill evaluator.
--        // Note that this works even if the MainActivity is opened later!
--        sttInputDevice.tryLoad(skillEvaluator::processInputEvent)
++
 +    private var usingDicioRecognizer = false
- 
--        // Unload the STT after a while because it would be using RAM uselessly
--        handler.removeCallbacks(releaseSttResourcesRunnable)
--        handler.postDelayed(releaseSttResourcesRunnable, RELEASE_STT_RESOURCES_MILLIS)
++
 +    private fun commandRecognizerName() =
 +        if (usingDicioRecognizer) "Dicio offline" else commandRecognizer.serviceName
 +            .removePrefix("com.google.android.").ifEmpty { "?" }
- 
--        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || MainActivity.isInForeground > 0) {
--            // start the activity directly on versions prior to Android 10,
--            // or if the MainActivity is already running in the foreground
--            startActivity(intent)
++
 +    private fun stopCommandListening() {
 +        commandRecognizer.stop()
 +        try {
@@ -1522,7 +1541,7 @@ index 81e12139..d2596ed6 100644
 +            timeouts.forEach { handler.removeCallbacks(it) }
 +            timeouts.clear()
 +        }
- 
++
 +        fun finish(reason: String, then: () -> Unit) {
 +            if (decided || session != commandSession) return
 +            decided = true
@@ -1589,7 +1608,10 @@ index 81e12139..d2596ed6 100644
 +            scope.launch { openClaude(wasScreenOff) }
 +            return
 +        }
-+
+ 
+-        // Start listening and pass STT events to the skill evaluator.
+-        // Note that this works even if the MainActivity is opened later!
+-        sttInputDevice.tryLoad(skillEvaluator::processInputEvent)
 +        val silenceTimeout = Runnable {
 +            if (!heardSomething) openVoicePanel("silenzio")
 +        }
@@ -1624,7 +1646,10 @@ index 81e12139..d2596ed6 100644
 +            debugToast("Non riesco ad aprire l'app Claude")
 +        }
 +    }
-+
+ 
+-        // Unload the STT after a while because it would be using RAM uselessly
+-        handler.removeCallbacks(releaseSttResourcesRunnable)
+-        handler.postDelayed(releaseSttResourcesRunnable, RELEASE_STT_RESOURCES_MILLIS)
 +    /**
 +     * PATCH (Dicio per Claude): runs a voice action ("apri Instagram", "chiama Mario in vivavoce",
 +     * "scrivi a Mario su whatsapp ciao"...). Must be called on the main thread. An invisible
@@ -1650,12 +1675,18 @@ index 81e12139..d2596ed6 100644
 +                    }
 +                }
 +            }
-+            PhoneActions.Result.NotHandled ->
-+                // Dicio's own skills: telephone, open app, flashlight, timer, media...
++            PhoneActions.Result.NotHandled -> {
++                // Dicio's own skills: flashlight, timer, media...
++                debugToast("Passo «$best» alle funzioni di Dicio")
 +                skillEvaluator.processInputEvent(InputEvent.Final(cleaned))
++            }
 +        }
 +    }
-+
+ 
+-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || MainActivity.isInForeground > 0) {
+-            // start the activity directly on versions prior to Android 10,
+-            // or if the MainActivity is already running in the foreground
+-            startActivity(intent)
 +    /** Opens Claude; blocks for a short while, must NOT be called on the main thread. */
 +    private fun openClaude(wasScreenOff: Boolean) {
 +        if (!ClaudeTrampolineActivity.isClaudeInstalled(this)) {
@@ -1663,7 +1694,7 @@ index 81e12139..d2596ed6 100644
 +            showToast("App Claude non trovata")
 +            return
 +        }
-+
+ 
 +        // Preferred way: show Claude's assistant panel, exactly like a long press of the power
 +        // button does (also over the lock screen), if Claude is the default digital assistant.
 +        if (ClaudeAssist.isClaudeDefaultAssistant(this) != false) {
@@ -1938,7 +1969,7 @@ index 81e12139..d2596ed6 100644
      companion object {
          /**
           * Starting from Android 11, it is not possible to start a foreground service
-@@ -308,10 +797,12 @@ class WakeService : Service() {
+@@ -308,10 +799,12 @@ class WakeService : Service() {
                  .setContentTitle(context.getString(R.string.wake_service_start_notification))
                  .setStyle(NotificationCompat.BigTextStyle().bigText(
                      context.getString(R.string.wake_service_start_notification_summary)))
@@ -1952,7 +1983,7 @@ index 81e12139..d2596ed6 100644
                  .build()
  
              notificationManager.notify(START_NOTIFICATION_ID, notification)
-@@ -324,6 +815,7 @@ class WakeService : Service() {
+@@ -324,6 +817,7 @@ class WakeService : Service() {
           */
          fun start(context: Context) {
              Log.d(TAG, "WakeService.start() called from ${Throwable().stackTrace[1]}")
@@ -1960,7 +1991,7 @@ index 81e12139..d2596ed6 100644
              val intent = Intent(context, WakeService::class.java)
              ContextCompat.startForegroundService(context, intent)
          }
-@@ -362,8 +854,89 @@ class WakeService : Service() {
+@@ -362,8 +856,89 @@ class WakeService : Service() {
              "org.stypox.dicio.io.wake.WakeService.TRIGGERED"
          private const val FOREGROUND_NOTIFICATION_ID = 19803672
          private const val START_NOTIFICATION_ID = 48019274
@@ -2053,10 +2084,10 @@ index 81e12139..d2596ed6 100644
          private const val RELEASE_STT_RESOURCES_MILLIS = 1000L * 60 * 5 // 5 minutes
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/WhatsAppSendService.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/WhatsAppSendService.kt
 new file mode 100644
-index 00000000..ad402ca2
+index 00000000..5b120b1a
 --- /dev/null
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/WhatsAppSendService.kt
-@@ -0,0 +1,399 @@
+@@ -0,0 +1,418 @@
 +package org.stypox.dicio.io.wake
 +
 +import android.accessibilityservice.AccessibilityService
@@ -2360,6 +2391,25 @@ index 00000000..ad402ca2
 +            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putLong(KEY, 0L).apply()
 +        }
 +
++        /**
++         * Starts an activity through the accessibility service if it is enabled: Android lets
++         * accessibility services open apps from the background, normal apps only with
++         * "Display over other apps" (and not always).
++         */
++        fun launch(context: Context, intent: Intent) {
++            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++            val service = instance
++            if (service != null) {
++                try {
++                    service.startActivity(intent)
++                    return
++                } catch (e: Exception) {
++                    Log.w(TAG, "Could not start activity from the accessibility service", e)
++                }
++            }
++            context.startActivity(intent)
++        }
++
 +        /** True if the user enabled this accessibility service. */
 +        fun isEnabled(context: Context): Boolean {
 +            val enabled = android.provider.Settings.Secure.getString(
@@ -2389,7 +2439,7 @@ index 00000000..ad402ca2
 +            if (intent == null) return false
 +            service.startQuestion(question, viaLink)
 +            return try {
-+                context.startActivity(intent)
++                launch(context, intent)
 +                true
 +            } catch (e: Exception) {
 +                Log.w(TAG, "Could not open Claude", e)
