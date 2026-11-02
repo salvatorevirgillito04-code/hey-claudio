@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">Invio WhatsApp</string>
-    <string name="service_name">Invio WhatsApp per Hey Claudio</string>
-    <string name="service_description">Preme \"Invia\" in WhatsApp solo subito dopo un comando vocale di Dicio per Claude che finisce con \"e invia\" (per esempio: \"Hey Claudio, manda un messaggio a Mario su WhatsApp ciao come stai e invia\"). Non legge e non salva i tuoi messaggi e non fa nient\'altro.</string>
-</resources>

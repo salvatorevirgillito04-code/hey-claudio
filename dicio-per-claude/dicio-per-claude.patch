@@ -1,5 +1,5 @@
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index f7ffad93..464cf0a1 100644
+index f7ffad93..dab10235 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
 @@ -30,10 +30,10 @@ android {
@@ -11,7 +11,7 @@ index f7ffad93..464cf0a1 100644
          minSdk = libs.versions.minSdk.get().toInt()
          targetSdk = libs.versions.targetSdk.get().toInt()
 -        versionCode = 19
-+        versionCode = 32
++        versionCode = 33
          versionName = "4.2"
          testInstrumentationRunner = "org.stypox.dicio.CustomTestRunner"
  
@@ -42,10 +42,10 @@ index f7ffad93..464cf0a1 100644
      coreLibraryDesugaring(libs.desugar.jdk.libs)
  
 diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
-index c66e4da0..986b418b 100644
+index c66e4da0..65488e97 100644
 --- a/app/src/main/AndroidManifest.xml
 +++ b/app/src/main/AndroidManifest.xml
-@@ -10,7 +10,30 @@
+@@ -10,7 +10,23 @@
      <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
      <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
      <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
@@ -59,14 +59,7 @@ index c66e4da0..986b418b 100644
 +    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 +    <!-- Dicio per Claude: alarms by voice -->
 +    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
-+    <!-- Dicio per Claude: only apps signed with the same key (the "Invio WhatsApp" companion)
-+         can use this, to press "Invia" in WhatsApp after a voice command -->
-+    <permission
-+        android:name="org.stypox.dicio.claude.permission.WHATSAPP_SEND"
-+        android:protectionLevel="signature" />
-+    <uses-permission android:name="org.stypox.dicio.claude.permission.WHATSAPP_SEND" />
 +    <queries>
-+        <package android:name="org.stypox.dicio.claude.invio" />
 +        <package android:name="com.whatsapp" />
 +        <package android:name="com.google.android.apps.maps" />
 +    </queries>
@@ -77,7 +70,7 @@ index c66e4da0..986b418b 100644
  
      <!-- required by the download manager for APIs < Q -->
      <uses-permission
-@@ -42,6 +65,7 @@
+@@ -42,6 +58,7 @@
          <activity
              android:name=".MainActivity"
              android:exported="true"
@@ -85,7 +78,7 @@ index c66e4da0..986b418b 100644
              android:windowSoftInputMode="adjustResize"
              android:launchMode="singleTop"
              android:showOnLockScreen="true">
-@@ -66,6 +90,33 @@
+@@ -66,6 +83,47 @@
                  android:resource="@xml/shortcuts" />
          </activity>
  
@@ -112,6 +105,20 @@ index c66e4da0..986b418b 100644
 +            android:showWhenLocked="true"
 +            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 +
++        <!-- Dicio per Claude: presses "Invia" in WhatsApp after "... e invia" -->
++        <service
++            android:name=".io.wake.WhatsAppSendService"
++            android:exported="false"
++            android:label="@string/whatsapp_send_service_label"
++            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
++            <intent-filter>
++                <action android:name="android.accessibilityservice.AccessibilityService" />
++            </intent-filter>
++            <meta-data
++                android:name="android.accessibilityservice"
++                android:resource="@xml/whatsapp_send_service" />
++        </service>
++
 +        <receiver
 +            android:name=".io.wake.WakeRestartReceiver"
 +            android:exported="false" />
@@ -119,7 +126,7 @@ index c66e4da0..986b418b 100644
          <activity
              android:name=".error.ErrorActivity"
              android:exported="false" />
-@@ -102,16 +153,6 @@
+@@ -102,16 +160,6 @@
                  android:resource="@xml/stt_service_metadata" />
          </service>
  
@@ -137,10 +144,10 @@ index c66e4da0..986b418b 100644
          <receiver
              android:name=".io.wake.BootBroadcastReceiver"
 diff --git a/app/src/main/kotlin/org/stypox/dicio/MainActivity.kt b/app/src/main/kotlin/org/stypox/dicio/MainActivity.kt
-index 4a8b8c31..b8543f2b 100644
+index 4a8b8c31..a9852d7a 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/MainActivity.kt
 +++ b/app/src/main/kotlin/org/stypox/dicio/MainActivity.kt
-@@ -93,6 +93,85 @@ class MainActivity : BaseActivity() {
+@@ -93,6 +93,100 @@ class MainActivity : BaseActivity() {
      override fun onStart() {
          isInForeground += 1
          super.onStart()
@@ -199,9 +206,24 @@ index 4a8b8c31..b8543f2b 100644
 +            )
 +        }
 +
++        steps += Triple(
++            "Per inviare i messaggi WhatsApp a voce attiva \"Hey Claudio: invio WhatsApp\" (in App installate / Servizi scaricati)",
++            {
++                org.stypox.dicio.io.wake.WhatsAppSendService.isEnabled(this) ||
++                        getSharedPreferences("dicio_per_claude", MODE_PRIVATE)
++                            .getBoolean("accessibility_asked", false)
++            },
++            Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
++        )
++
 +        for ((message, isGranted, intent) in steps) {
 +            if (isGranted() || message in claudePermissionsAsked) continue
 +            claudePermissionsAsked += message
++            if (intent.action == android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS) {
++                // ask only once ever, it is optional
++                getSharedPreferences("dicio_per_claude", MODE_PRIVATE).edit()
++                    .putBoolean("accessibility_asked", true).apply()
++            }
 +            android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_LONG).show()
 +            try {
 +                startActivity(intent)
@@ -226,7 +248,7 @@ index 4a8b8c31..b8543f2b 100644
      }
  
      override fun onStop() {
-@@ -176,6 +255,9 @@ class MainActivity : BaseActivity() {
+@@ -176,6 +270,9 @@ class MainActivity : BaseActivity() {
  
          var isInForeground: Int = 0
              private set
@@ -595,10 +617,10 @@ index 00000000..ce9fbdab
 +}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/PhoneActions.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/PhoneActions.kt
 new file mode 100644
-index 00000000..2f307a75
+index 00000000..71bb045f
 --- /dev/null
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/PhoneActions.kt
-@@ -0,0 +1,237 @@
+@@ -0,0 +1,223 @@
 +package org.stypox.dicio.io.wake
 +
 +import android.Manifest
@@ -623,10 +645,6 @@ index 00000000..2f307a75
 +object PhoneActions {
 +    private const val TAG = "PhoneActions"
 +    const val WHATSAPP = "com.whatsapp"
-+    /** Companion app with the accessibility service that presses "Invia" in WhatsApp. */
-+    const val SENDER_PACKAGE = "org.stypox.dicio.claude.invio"
-+    const val SENDER_ACTION = "org.stypox.dicio.claude.invio.SEND_NEXT"
-+    const val SENDER_PERMISSION = "org.stypox.dicio.claude.permission.WHATSAPP_SEND"
 +    private const val WHATSAPP_VOICE = "vnd.android.cursor.item/vnd.com.whatsapp.voip.call"
 +    private const val WHATSAPP_VIDEO = "vnd.android.cursor.item/vnd.com.whatsapp.video.call"
 +
@@ -713,13 +731,6 @@ index 00000000..2f307a75
 +        return Pair(chosen.second, message.trim())
 +    }
 +
-+    private fun isSenderInstalled(context: Context) = try {
-+        context.packageManager.getPackageInfo(SENDER_PACKAGE, 0)
-+        true
-+    } catch (e: Exception) {
-+        false
-+    }
-+
 +    private fun whatsappMessage(context: Context, rest: String, autoSend: Boolean): Result {
 +        if (!hasContactsPermission(context)) {
 +            return Result.Done("Per scrivere messaggi devo poter leggere i contatti")
@@ -738,14 +749,11 @@ index 00000000..2f307a75
 +        }
 +        var speech: String? = null
 +        if (autoSend && message.isNotEmpty()) {
-+            if (isSenderInstalled(context)) {
-+                // the companion app will press "Invia" as soon as the chat is open
-+                context.sendBroadcast(
-+                    Intent(SENDER_ACTION).setPackage(SENDER_PACKAGE),
-+                    SENDER_PERMISSION
-+                )
++            if (WhatsAppSendService.isEnabled(context)) {
++                // the accessibility service will press "Invia" as soon as the chat is open
++                WhatsAppSendService.arm(context)
 +            } else {
-+                speech = "Per inviare da solo serve l'app Invio WhatsApp"
++                speech = "Per inviare da solo attiva Hey Claudio invio WhatsApp nelle impostazioni di accessibilità"
 +            }
 +        }
 +        return try {
@@ -968,7 +976,7 @@ index 00000000..c578f293
 +    }
 +}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
-index 81e12139..1d2ab3ff 100644
+index 81e12139..85c3f82c 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 @@ -35,6 +35,7 @@ import org.stypox.dicio.R
@@ -1121,7 +1129,7 @@ index 81e12139..1d2ab3ff 100644
                  }
  
                  lastHeard.set(Instant.now())
-@@ -221,61 +322,384 @@ class WakeService : Service() {
+@@ -221,61 +322,399 @@ class WakeService : Service() {
          }
      }
  
@@ -1142,6 +1150,7 @@ index 81e12139..1d2ab3ff 100644
 -        intent.setAction(ACTION_WAKE_WORD)
 -        intent.setFlags(FLAG_ACTIVITY_NEW_TASK)
 +        vibrateHeard()
++        debugToast("Hey Claudio: ti ascolto")
 +        val wasScreenOff = wakeUpScreen()
 +
 +        // PATCH (Dicio per Claude): Claude always opens right away (voice assistant), while Dicio
@@ -1152,12 +1161,15 @@ index 81e12139..1d2ab3ff 100644
 +        scope.launch { openClaude(wasScreenOff) }
 +        return true
 +    }
-+
-+    private var commandSession = 0
  
 -        // Start listening and pass STT events to the skill evaluator.
 -        // Note that this works even if the MainActivity is opened later!
 -        sttInputDevice.tryLoad(skillEvaluator::processInputEvent)
++    private var commandSession = 0
+ 
+-        // Unload the STT after a while because it would be using RAM uselessly
+-        handler.removeCallbacks(releaseSttResourcesRunnable)
+-        handler.postDelayed(releaseSttResourcesRunnable, RELEASE_STT_RESOURCES_MILLIS)
 +    /** Must be called on the main thread. */
 +    private fun listenForCommand() {
 +        val session = ++commandSession
@@ -1165,31 +1177,29 @@ index 81e12139..1d2ab3ff 100644
 +        var heardSomething = false
 +        val timeouts = mutableListOf<Runnable>()
  
--        // Unload the STT after a while because it would be using RAM uselessly
--        handler.removeCallbacks(releaseSttResourcesRunnable)
--        handler.postDelayed(releaseSttResourcesRunnable, RELEASE_STT_RESOURCES_MILLIS)
+-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || MainActivity.isInForeground > 0) {
+-            // start the activity directly on versions prior to Android 10,
+-            // or if the MainActivity is already running in the foreground
+-            startActivity(intent)
 +        fun clearTimeouts() {
 +            timeouts.forEach { handler.removeCallbacks(it) }
 +            timeouts.clear()
 +        }
  
--        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || MainActivity.isInForeground > 0) {
--            // start the activity directly on versions prior to Android 10,
--            // or if the MainActivity is already running in the foreground
--            startActivity(intent)
 +        // not a phone call: stop listening, so that the microphone is all Claude's
 +        fun decideClaude(reason: String) {
 +            if (decided || session != commandSession) return
 +            decided = true
 +            clearTimeouts()
 +            Log.d(TAG, "Not a phone call, leaving it to Claude: $reason")
++            debugToast("Hey Claudio → Claude ($reason)")
 +            try {
 +                sttInputDevice.stopListening()
 +            } catch (e: Exception) {
 +                Log.w(TAG, "Could not stop STT", e)
 +            }
 +        }
- 
++
 +        val listener: (InputEvent) -> Unit = { event ->
 +            handler.post {
 +                if (decided || session != commandSession) return@post
@@ -1199,26 +1209,28 @@ index 81e12139..1d2ab3ff 100644
 +                        if (words.isNotEmpty()) {
 +                            heardSomething = true
 +                            if (words.size >= 2 && !isActionStart(words)) {
-+                                decideClaude("not a call: ${words.joinToString(" ")}")
++                                decideClaude("«${words.joinToString(" ")}» non è un comando")
 +                            }
 +                        }
 +                    }
 +                    is InputEvent.Final -> {
 +                        val cleaned = event.utterances.map { Pair(cleanCommand(it.first), it.second) }
 +                        val best = cleaned.firstOrNull()?.first ?: ""
++                        debugToast("Ho sentito: «$best»")
 +                        if (isActionStart(best.split(' ').filter { it.isNotEmpty() })) {
 +                            decided = true
 +                            clearTimeouts()
 +                            Log.d(TAG, "Phone action: $best")
++                            debugToast("Eseguo: «$best»")
 +                            // do not reopen Claude after unlocking, an action is being done
 +                            unregisterUnlockReceiver()
 +                            runPhoneAction(best, cleaned)
 +                        } else {
-+                            decideClaude("final: $best")
++                            decideClaude("«$best» non è un comando")
 +                        }
 +                    }
-+                    InputEvent.None -> decideClaude("nothing said")
-+                    is InputEvent.Error -> decideClaude("STT error ${event.throwable}")
++                    InputEvent.None -> decideClaude("non ho sentito un comando")
++                    is InputEvent.Error -> decideClaude("errore del riconoscimento: ${event.throwable.message}")
 +                }
 +            }
 +        }
@@ -1231,13 +1243,14 @@ index 81e12139..1d2ab3ff 100644
 +        }
 +        if (!started) {
 +            Log.w(TAG, "STT not available, phone calls by voice will not work")
++            debugToast("Il riconoscimento vocale di Dicio non è pronto: apri Dicio per Claude e tocca una volta il microfono")
 +            return
 +        }
 +
 +        val silenceTimeout = Runnable {
-+            if (!heardSomething) decideClaude("silence after wake word")
++            if (!heardSomething) decideClaude("silenzio")
 +        }
-+        val hardTimeout = Runnable { decideClaude("command timeout") }
++        val hardTimeout = Runnable { decideClaude("tempo scaduto") }
 +        timeouts += silenceTimeout
 +        timeouts += hardTimeout
 +        handler.postDelayed(silenceTimeout, COMMAND_SILENCE_MILLIS)
@@ -1291,6 +1304,7 @@ index 81e12139..1d2ab3ff 100644
 +                latch.countDown()
 +            }, if (wasScreenOff) SCREEN_ON_DELAY_MILLIS else 0L)
 +            latch.await(SCREEN_ON_DELAY_MILLIS + 2000L, java.util.concurrent.TimeUnit.MILLISECONDS)
++            if (!launched.get()) debugToast("Non riesco ad aprire il pannello di Claude, provo ad aprire l'app")
 +            if (launched.get()) {
 +                // On the lock screen Claude only says to unlock the phone, and then does not open
 +                // by itself: so open it again as soon as the phone gets unlocked.
@@ -1313,9 +1327,6 @@ index 81e12139..1d2ab3ff 100644
 -                TRIGGERED_NOTIFICATION_CHANNEL_ID,
 -                getString(R.string.wake_service_triggered_notification),
 -                NotificationManager.IMPORTANCE_HIGH
--            )
--            channel.description = getString(R.string.wake_service_triggered_notification_summary)
--            notificationManager.createNotificationChannel(channel)
 +        val intent = Intent(this, ClaudeTrampolineActivity::class.java)
 +            .addFlags(FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
 +
@@ -1339,12 +1350,7 @@ index 81e12139..1d2ab3ff 100644
 +        }
 +        return
 +    }
- 
--            val pendingIntent = PendingIntent.getActivity(
--                this,
--                0,
--                intent,
--                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
++
 +    @Volatile
 +    private var micPausedUntil: Instant = Instant.MIN
 +
@@ -1426,6 +1432,8 @@ index 81e12139..1d2ab3ff 100644
 +                this, receiver, android.content.IntentFilter(Intent.ACTION_USER_PRESENT),
 +                ContextCompat.RECEIVER_EXPORTED
              )
+-            channel.description = getString(R.string.wake_service_triggered_notification_summary)
+-            notificationManager.createNotificationChannel(channel)
 +            unlockReceiver = receiver
 +            handler.postDelayed(unlockTimeoutRunnable, UNLOCK_WAIT_MILLIS)
 +        } catch (e: Exception) {
@@ -1433,14 +1441,11 @@ index 81e12139..1d2ab3ff 100644
 +        }
 +    }
  
--            val notification = NotificationCompat.Builder(this, TRIGGERED_NOTIFICATION_CHANNEL_ID)
--                .setSmallIcon(R.drawable.ic_hearing_white)
--                .setContentTitle(getString(R.string.wake_service_triggered_notification))
--                .setStyle(NotificationCompat.BigTextStyle().bigText(
--                    getString(R.string.wake_service_triggered_notification_summary)))
--                .setPriority(NotificationCompat.PRIORITY_HIGH)
--                .setFullScreenIntent(pendingIntent, true)
--                .build()
+-            val pendingIntent = PendingIntent.getActivity(
+-                this,
+-                0,
+-                intent,
+-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
 +    private fun unregisterUnlockReceiver() {
 +        handler.removeCallbacks(unlockTimeoutRunnable)
 +        unlockReceiver?.let {
@@ -1452,9 +1457,7 @@ index 81e12139..1d2ab3ff 100644
 +        }
 +        unlockReceiver = null
 +    }
- 
--            notificationManager.cancel(TRIGGERED_NOTIFICATION_ID)
--            notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
++
 +    /** Returns true if the screen was off (and has been turned on). */
 +    @Suppress("DEPRECATION")
 +    private fun wakeUpScreen(): Boolean {
@@ -1487,16 +1490,24 @@ index 81e12139..1d2ab3ff 100644
 +                        android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
 +                        android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
 +                android.graphics.PixelFormat.TRANSLUCENT
-+            )
+             )
 +            params.gravity = android.view.Gravity.TOP or android.view.Gravity.START
 +            wm.addView(view, params)
 +            view
 +        } catch (e: Exception) {
 +            Log.w(TAG, "Could not show overlay", e)
 +            null
-         }
-     }
++        }
++    }
  
+-            val notification = NotificationCompat.Builder(this, TRIGGERED_NOTIFICATION_CHANNEL_ID)
+-                .setSmallIcon(R.drawable.ic_hearing_white)
+-                .setContentTitle(getString(R.string.wake_service_triggered_notification))
+-                .setStyle(NotificationCompat.BigTextStyle().bigText(
+-                    getString(R.string.wake_service_triggered_notification_summary)))
+-                .setPriority(NotificationCompat.PRIORITY_HIGH)
+-                .setFullScreenIntent(pendingIntent, true)
+-                .build()
 +    private fun removeOverlay(view: android.view.View?) {
 +        if (view == null) return
 +        try {
@@ -1505,7 +1516,9 @@ index 81e12139..1d2ab3ff 100644
 +            Log.w(TAG, "Could not remove overlay", e)
 +        }
 +    }
-+
+ 
+-            notificationManager.cancel(TRIGGERED_NOTIFICATION_ID)
+-            notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
 +    private fun showFullScreenNotification(intent: Intent) {
 +        val channel = NotificationChannel(
 +            TRIGGERED_NOTIFICATION_CHANNEL_ID,
@@ -1539,6 +1552,15 @@ index 81e12139..1d2ab3ff 100644
 +        notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
 +    }
 +
++    /** PATCH (Dicio per Claude): on-screen messages to understand what happens, for testing. */
++    private fun debugToast(text: String) {
++        if (DEBUG_TOASTS) {
++            handler.post {
++                android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show()
++            }
+         }
+     }
+ 
 +    private fun showToast(text: String) {
 +        handler.post { android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_SHORT).show() }
 +    }
@@ -1546,7 +1568,7 @@ index 81e12139..1d2ab3ff 100644
      companion object {
          /**
           * Starting from Android 11, it is not possible to start a foreground service
-@@ -308,10 +732,12 @@ class WakeService : Service() {
+@@ -308,10 +747,12 @@ class WakeService : Service() {
                  .setContentTitle(context.getString(R.string.wake_service_start_notification))
                  .setStyle(NotificationCompat.BigTextStyle().bigText(
                      context.getString(R.string.wake_service_start_notification_summary)))
@@ -1560,7 +1582,7 @@ index 81e12139..1d2ab3ff 100644
                  .build()
  
              notificationManager.notify(START_NOTIFICATION_ID, notification)
-@@ -324,6 +750,7 @@ class WakeService : Service() {
+@@ -324,6 +765,7 @@ class WakeService : Service() {
           */
          fun start(context: Context) {
              Log.d(TAG, "WakeService.start() called from ${Throwable().stackTrace[1]}")
@@ -1568,7 +1590,7 @@ index 81e12139..1d2ab3ff 100644
              val intent = Intent(context, WakeService::class.java)
              ContextCompat.startForegroundService(context, intent)
          }
-@@ -362,8 +789,57 @@ class WakeService : Service() {
+@@ -362,8 +804,58 @@ class WakeService : Service() {
              "org.stypox.dicio.io.wake.WakeService.TRIGGERED"
          private const val FOREGROUND_NOTIFICATION_ID = 19803672
          private const val START_NOTIFICATION_ID = 48019274
@@ -1584,6 +1606,7 @@ index 81e12139..1d2ab3ff 100644
 +        private const val MIC_PAUSE_AFTER_WAKE_MILLIS = 8000L
 +        private const val COMMAND_SILENCE_MILLIS = 2000L
 +        private const val ACTION_OVERLAY_MILLIS = 10000L
++        private const val DEBUG_TOASTS = true
 +        private const val COMMAND_MAX_MILLIS = 10000L
 +        private val LEADING_WAKE_WORDS = setOf(
 +            "hey", "ehi", "ei", "hei", "eh", "e", "ok", "claudio", "claudia", "audio", "claud"
@@ -1627,6 +1650,99 @@ index 81e12139..1d2ab3ff 100644
          private const val ACTION_STOP_WAKE_SERVICE =
              "org.stypox.dicio.io.wake.WakeService.ACTION_STOP"
          private const val RELEASE_STT_RESOURCES_MILLIS = 1000L * 60 * 5 // 5 minutes
+diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/WhatsAppSendService.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/WhatsAppSendService.kt
+new file mode 100644
+index 00000000..e23a049b
+--- /dev/null
++++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/WhatsAppSendService.kt
+@@ -0,0 +1,87 @@
++package org.stypox.dicio.io.wake
++
++import android.accessibilityservice.AccessibilityService
++import android.content.Context
++import android.util.Log
++import android.view.accessibility.AccessibilityEvent
++import android.view.accessibility.AccessibilityNodeInfo
++
++/**
++ * PATCH (Dicio per Claude): presses "Invia" in WhatsApp, but only for a few seconds after a voice
++ * command ending with "e invia" ([arm] is called right before the chat is opened). It never reads
++ * or stores messages and only looks at WhatsApp windows.
++ */
++class WhatsAppSendService : AccessibilityService() {
++
++    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
++        if (!isArmed(this)) return
++        val root = rootInActiveWindow ?: return
++        if (root.packageName?.toString()?.startsWith("com.whatsapp") != true) return
++        val button = findSendButton(root) ?: return
++        if (clickNodeOrParent(button)) {
++            Log.d(TAG, "Pressed Invia")
++            disarm(this)
++        }
++    }
++
++    override fun onInterrupt() {}
++
++    companion object {
++        private const val TAG = "WhatsAppSendService"
++        private const val PREFS = "whatsapp_send"
++        private const val KEY = "armed_until"
++        private const val VALID_MILLIS = 20_000L
++        private val SEND_IDS = listOf("com.whatsapp:id/send", "com.whatsapp.w4b:id/send")
++        private val SEND_DESCRIPTIONS = listOf("Invia", "Send")
++
++        fun arm(context: Context) {
++            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
++                .putLong(KEY, System.currentTimeMillis() + VALID_MILLIS).apply()
++        }
++
++        private fun isArmed(context: Context) = System.currentTimeMillis() <
++                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getLong(KEY, 0L)
++
++        private fun disarm(context: Context) {
++            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putLong(KEY, 0L).apply()
++        }
++
++        /** True if the user enabled this accessibility service. */
++        fun isEnabled(context: Context): Boolean {
++            val enabled = android.provider.Settings.Secure.getString(
++                context.contentResolver,
++                android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
++            ) ?: return false
++            return enabled.split(':').any {
++                it.startsWith(context.packageName + "/") && it.endsWith("WhatsAppSendService")
++            }
++        }
++
++        private fun findSendButton(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
++            for (id in SEND_IDS) {
++                root.findAccessibilityNodeInfosByViewId(id)
++                    ?.firstOrNull { it.isVisibleToUser && it.isEnabled }
++                    ?.let { return it }
++            }
++            for (description in SEND_DESCRIPTIONS) {
++                root.findAccessibilityNodeInfosByText(description)
++                    ?.firstOrNull {
++                        it.contentDescription?.toString().equals(description, ignoreCase = true) &&
++                                it.isVisibleToUser && it.isEnabled
++                    }
++                    ?.let { return it }
++            }
++            return null
++        }
++
++        private fun clickNodeOrParent(node: AccessibilityNodeInfo): Boolean {
++            var current: AccessibilityNodeInfo? = node
++            repeat(3) {
++                val c = current ?: return false
++                if (c.isClickable) return c.performAction(AccessibilityNodeInfo.ACTION_CLICK)
++                current = c.parent
++            }
++            return false
++        }
++    }
++}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/oww/OpenWakeWordDevice.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/oww/OpenWakeWordDevice.kt
 index 9027a731..c7208456 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/io/wake/oww/OpenWakeWordDevice.kt
@@ -1958,7 +2074,7 @@ index 40adb5a1..20e5e6f2 100644
      <string name="wake_word_error_downloading_network">Dicio non è riuscito a connettersi a Internet. Controlla la tua connessione e riprova.</string>
      <string name="wake_word_error_loading">Errore imprevisto durante il caricamento</string>
 diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
-index b5e8c883..69ee605a 100644
+index b5e8c883..a9bc253e 100644
 --- a/app/src/main/res/values/strings.xml
 +++ b/app/src/main/res/values/strings.xml
 @@ -1,6 +1,6 @@
@@ -1987,3 +2103,25 @@ index b5e8c883..69ee605a 100644
      <string name="wake_service_triggered_notification_summary">In Android 10+ Dicio can\'t start when a wake word is detected without showing a notification.</string>
      <string name="wake_word_setup_title">Setup wake word</string>
      <string name="wake_word_setup_description">Dicio will wake up automatically whenever you say \"Hey Dicio\".
+@@ -281,4 +280,6 @@
+     <string name="about_privacy_title">Privacy policy</string>
+     <string name="about_privacy_description">Dicio connects to external services only when a skill is expected to do so, or to download machine learning models during setup. All speech processing is performed locally on-device, and most skills can be used offline.</string>
+     <string name="about_privacy_link" translatable="false">https://stypox.org/dicio-privacy-policy.html</string>
++    <string name="whatsapp_send_service_label" translatable="false">Hey Claudio: invio WhatsApp</string>
++    <string name="whatsapp_send_service_description" translatable="false">Preme \"Invia\" in WhatsApp solo subito dopo un tuo comando vocale che finisce con \"e invia\" (per esempio: \"Hey Claudio, manda un messaggio a Mario su WhatsApp ciao come stai e invia\"). Non legge e non salva i tuoi messaggi e non fa nient\'altro.</string>
+ </resources>
+diff --git a/app/src/main/res/xml/whatsapp_send_service.xml b/app/src/main/res/xml/whatsapp_send_service.xml
+new file mode 100644
+index 00000000..5eb639e8
+--- /dev/null
++++ b/app/src/main/res/xml/whatsapp_send_service.xml
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
++    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
++    android:accessibilityFeedbackType="feedbackGeneric"
++    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
++    android:canRetrieveWindowContent="true"
++    android:description="@string/whatsapp_send_service_description"
++    android:notificationTimeout="100"
++    android:packageNames="com.whatsapp,com.whatsapp.w4b" />

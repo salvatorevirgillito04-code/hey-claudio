@@ -1,0 +1,26 @@
+{
+    "logs": [
+        {
+            "outputFile": "org.stypox.dicio.claude.invio-mergeReleaseResources-2:/values/values.xml",
+            "map": [
+                {
+                    "source": "/home/user/hey-claudio/invio-whatsapp/src/main/res/values/strings.xml",
+                    "from": {
+                        "startLines": "2,4,3",
+                        "startColumns": "4,4,4",
+                        "startOffsets": "55,179,107",
+                        "endColumns": "51,314,71",
+                        "endOffsets": "102,489,174"
+                    },
+                    "to": {
+                        "startLines": "2,3,4",
+                        "startColumns": "4,4,4",
+                        "startOffsets": "55,107,422",
+                        "endColumns": "51,314,71",
+                        "endOffsets": "102,417,489"
+                    }
+                }
+            ]
+        }
+    ]
+}

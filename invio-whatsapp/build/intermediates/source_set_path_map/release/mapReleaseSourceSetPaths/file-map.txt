@@ -1,0 +1,7 @@
+org.stypox.dicio.claude.invio-pngs-0 /home/user/hey-claudio/invio-whatsapp/build/generated/res/pngs/release
+org.stypox.dicio.claude.invio-resValues-1 /home/user/hey-claudio/invio-whatsapp/build/generated/res/resValues/release
+org.stypox.dicio.claude.invio-packageReleaseResources-2 /home/user/hey-claudio/invio-whatsapp/build/intermediates/incremental/release/packageReleaseResources/merged.dir
+org.stypox.dicio.claude.invio-packageReleaseResources-3 /home/user/hey-claudio/invio-whatsapp/build/intermediates/incremental/release/packageReleaseResources/stripped.dir
+org.stypox.dicio.claude.invio-release-4 /home/user/hey-claudio/invio-whatsapp/build/intermediates/merged_res/release/mergeReleaseResources
+org.stypox.dicio.claude.invio-main-5 /home/user/hey-claudio/invio-whatsapp/src/main/res
+org.stypox.dicio.claude.invio-release-6 /home/user/hey-claudio/invio-whatsapp/src/release/res
