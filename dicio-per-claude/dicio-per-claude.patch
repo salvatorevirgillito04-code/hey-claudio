@@ -1,5 +1,5 @@
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index f7ffad93..3b037acd 100644
+index f7ffad93..901e9255 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
 @@ -30,10 +30,10 @@ android {
@@ -11,7 +11,7 @@ index f7ffad93..3b037acd 100644
          minSdk = libs.versions.minSdk.get().toInt()
          targetSdk = libs.versions.targetSdk.get().toInt()
 -        versionCode = 19
-+        versionCode = 24
++        versionCode = 25
          versionName = "4.2"
          testInstrumentationRunner = "org.stypox.dicio.CustomTestRunner"
  
@@ -42,7 +42,7 @@ index f7ffad93..3b037acd 100644
      coreLibraryDesugaring(libs.desugar.jdk.libs)
  
 diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
-index c66e4da0..80fc0c04 100644
+index c66e4da0..036af089 100644
 --- a/app/src/main/AndroidManifest.xml
 +++ b/app/src/main/AndroidManifest.xml
 @@ -10,7 +10,12 @@
@@ -59,7 +59,15 @@ index c66e4da0..80fc0c04 100644
  
      <!-- required by the download manager for APIs < Q -->
      <uses-permission
-@@ -66,6 +71,18 @@
+@@ -42,6 +47,7 @@
+         <activity
+             android:name=".MainActivity"
+             android:exported="true"
++            android:excludeFromRecents="true"
+             android:windowSoftInputMode="adjustResize"
+             android:launchMode="singleTop"
+             android:showOnLockScreen="true">
+@@ -66,6 +72,18 @@
                  android:resource="@xml/shortcuts" />
          </activity>
  
@@ -78,7 +86,7 @@ index c66e4da0..80fc0c04 100644
          <activity
              android:name=".error.ErrorActivity"
              android:exported="false" />
-@@ -102,16 +119,6 @@
+@@ -102,16 +120,6 @@
                  android:resource="@xml/stt_service_metadata" />
          </service>
  
@@ -373,10 +381,18 @@ index 00000000..0d7939a9
 +    }
 +}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
-index 81e12139..138cd29c 100644
+index 81e12139..74cc2f17 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
-@@ -210,7 +210,17 @@ class WakeService : Service() {
+@@ -129,6 +129,7 @@ class WakeService : Service() {
+     }
+ 
+     override fun onDestroy() {
++        handler.post { unregisterUnlockReceiver() }
+         listening.set(false)
+         job.cancel()
+         wakeDevice.reinitializeToReleaseResources()
+@@ -210,7 +211,19 @@ class WakeService : Service() {
                  val wakeWordDetected = wakeDevice.processFrame(audio)
                  if (wakeWordDetected && Instant.now() > nextWakeWordAllowed) {
                      nextWakeWordAllowed = Instant.now().plusMillis(WAKE_WORD_BACKOFF_MILLIS)
@@ -384,8 +400,10 @@ index 81e12139..138cd29c 100644
 +                    if (!onWakeWordDetected()) continue
 +                    // PATCH (Dicio per Claude): free the microphone so Claude can listen
 +                    ar.stop()
-+                    val resumeAt = Instant.now().plusMillis(MIC_PAUSE_AFTER_WAKE_MILLIS)
-+                    while (listening.get() && Instant.now() < resumeAt) {
++                    if (micPausedUntil.isBefore(Instant.now().plusMillis(MIC_PAUSE_AFTER_WAKE_MILLIS))) {
++                        micPausedUntil = Instant.now().plusMillis(MIC_PAUSE_AFTER_WAKE_MILLIS)
++                    }
++                    while (listening.get() && Instant.now() < micPausedUntil) {
 +                        Thread.sleep(200)
 +                    }
 +                    if (!listening.get()) break
@@ -395,7 +413,7 @@ index 81e12139..138cd29c 100644
                  }
  
                  lastHeard.set(Instant.now())
-@@ -221,59 +231,151 @@ class WakeService : Service() {
+@@ -221,59 +234,201 @@ class WakeService : Service() {
          }
      }
  
@@ -434,7 +452,16 @@ index 81e12139..138cd29c 100644
 +                latch.countDown()
 +            }, if (wasScreenOff) SCREEN_ON_DELAY_MILLIS else 0L)
 +            latch.await(SCREEN_ON_DELAY_MILLIS + 2000L, java.util.concurrent.TimeUnit.MILLISECONDS)
-+            if (launched.get()) return true
++            if (launched.get()) {
++                // On the lock screen Claude only says to unlock the phone, and then does not open
++                // by itself: so open it again as soon as the phone gets unlocked.
++                val keyguard = getSystemService(this, android.app.KeyguardManager::class.java)
++                if (wasScreenOff || keyguard?.isKeyguardLocked == true) {
++                    micPausedUntil = Instant.now().plusMillis(UNLOCK_WAIT_MILLIS)
++                    handler.post { openClaudeAfterUnlock() }
++                }
++                return true
++            }
 +        } else {
 +            showToast("Imposta Claude come assistente digitale predefinito")
 +        }
@@ -469,6 +496,56 @@ index 81e12139..138cd29c 100644
 -        // Unload the STT after a while because it would be using RAM uselessly
 -        handler.removeCallbacks(releaseSttResourcesRunnable)
 -        handler.postDelayed(releaseSttResourcesRunnable, RELEASE_STT_RESOURCES_MILLIS)
++    @Volatile
++    private var micPausedUntil: Instant = Instant.MIN
++    private var unlockReceiver: android.content.BroadcastReceiver? = null
++    private val unlockTimeoutRunnable = Runnable { unregisterUnlockReceiver() }
++
++    /** Must be called on the main thread. */
++    private fun openClaudeAfterUnlock() {
++        unregisterUnlockReceiver()
++        val receiver = object : android.content.BroadcastReceiver() {
++            override fun onReceive(context: Context?, intent: Intent?) {
++                Log.d(TAG, "Phone unlocked, opening Claude")
++                unregisterUnlockReceiver()
++                micPausedUntil = Instant.now().plusMillis(MIC_PAUSE_AFTER_WAKE_MILLIS)
++                handler.postDelayed({ ClaudeAssist.launch(this@WakeService) }, AFTER_UNLOCK_DELAY_MILLIS)
++            }
++        }
++        try {
++            // USER_PRESENT is a protected broadcast, only the system can send it
++            ContextCompat.registerReceiver(
++                this, receiver, android.content.IntentFilter(Intent.ACTION_USER_PRESENT),
++                ContextCompat.RECEIVER_EXPORTED
++            )
++            unlockReceiver = receiver
++            handler.postDelayed(unlockTimeoutRunnable, UNLOCK_WAIT_MILLIS)
++        } catch (e: Exception) {
++            Log.w(TAG, "Could not wait for unlock", e)
++        }
++    }
+ 
+-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || MainActivity.isInForeground > 0) {
+-            // start the activity directly on versions prior to Android 10,
+-            // or if the MainActivity is already running in the foreground
+-            startActivity(intent)
++    private fun unregisterUnlockReceiver() {
++        handler.removeCallbacks(unlockTimeoutRunnable)
++        unlockReceiver?.let {
++            try {
++                unregisterReceiver(it)
++            } catch (e: Exception) {
++                Log.w(TAG, "Could not unregister unlock receiver", e)
++            }
++        }
++        unlockReceiver = null
++    }
+ 
+-        } else {
+-            // Android 10+ does not allow starting activities from the background,
+-            // so show a full-screen notification instead, which does actually result in starting
+-            // the activity from the background if the phone is off and Do Not Disturb is not active
+-            // Maybe we could also use the "Display over other apps" permission?
 +    /** Returns true if the screen was off (and has been turned on). */
 +    @Suppress("DEPRECATION")
 +    private fun wakeUpScreen(): Boolean {
@@ -488,10 +565,10 @@ index 81e12139..138cd29c 100644
 +        }
 +    }
  
--        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || MainActivity.isInForeground > 0) {
--            // start the activity directly on versions prior to Android 10,
--            // or if the MainActivity is already running in the foreground
--            startActivity(intent)
+-            val channel = NotificationChannel(
+-                TRIGGERED_NOTIFICATION_CHANNEL_ID,
+-                getString(R.string.wake_service_triggered_notification),
+-                NotificationManager.IMPORTANCE_HIGH
 +    private fun showInvisibleOverlay(): android.view.View? {
 +        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
 +            !android.provider.Settings.canDrawOverlays(this)) return null
@@ -505,7 +582,9 @@ index 81e12139..138cd29c 100644
 +                        android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
 +                        android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
 +                android.graphics.PixelFormat.TRANSLUCENT
-+            )
+             )
+-            channel.description = getString(R.string.wake_service_triggered_notification_summary)
+-            notificationManager.createNotificationChannel(channel)
 +            params.gravity = android.view.Gravity.TOP or android.view.Gravity.START
 +            wm.addView(view, params)
 +            view
@@ -515,11 +594,12 @@ index 81e12139..138cd29c 100644
 +        }
 +    }
  
--        } else {
--            // Android 10+ does not allow starting activities from the background,
--            // so show a full-screen notification instead, which does actually result in starting
--            // the activity from the background if the phone is off and Do Not Disturb is not active
--            // Maybe we could also use the "Display over other apps" permission?
+-            val pendingIntent = PendingIntent.getActivity(
+-                this,
+-                0,
+-                intent,
+-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+-            )
 +    private fun removeOverlay(view: android.view.View?) {
 +        if (view == null) return
 +        try {
@@ -529,13 +609,14 @@ index 81e12139..138cd29c 100644
 +        }
 +    }
  
--            val channel = NotificationChannel(
--                TRIGGERED_NOTIFICATION_CHANNEL_ID,
--                getString(R.string.wake_service_triggered_notification),
--                NotificationManager.IMPORTANCE_HIGH
--            )
--            channel.description = getString(R.string.wake_service_triggered_notification_summary)
--            notificationManager.createNotificationChannel(channel)
+-            val notification = NotificationCompat.Builder(this, TRIGGERED_NOTIFICATION_CHANNEL_ID)
+-                .setSmallIcon(R.drawable.ic_hearing_white)
+-                .setContentTitle(getString(R.string.wake_service_triggered_notification))
+-                .setStyle(NotificationCompat.BigTextStyle().bigText(
+-                    getString(R.string.wake_service_triggered_notification_summary)))
+-                .setPriority(NotificationCompat.PRIORITY_HIGH)
+-                .setFullScreenIntent(pendingIntent, true)
+-                .build()
 +    private fun showFullScreenNotification(intent: Intent) {
 +        val channel = NotificationChannel(
 +            TRIGGERED_NOTIFICATION_CHANNEL_ID,
@@ -552,12 +633,9 @@ index 81e12139..138cd29c 100644
 +            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
 +        )
  
--            val pendingIntent = PendingIntent.getActivity(
--                this,
--                0,
--                intent,
--                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
--            )
+-            notificationManager.cancel(TRIGGERED_NOTIFICATION_ID)
+-            notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
+-        }
 +        val notification = NotificationCompat.Builder(this, TRIGGERED_NOTIFICATION_CHANNEL_ID)
 +            .setSmallIcon(R.drawable.ic_hearing_white)
 +            .setContentTitle("Hey Claudio")
@@ -570,28 +648,17 @@ index 81e12139..138cd29c 100644
 +            .setTimeoutAfter(TRIGGERED_NOTIFICATION_TIMEOUT_MILLIS)
 +            .setFullScreenIntent(pendingIntent, true)
 +            .build()
- 
--            val notification = NotificationCompat.Builder(this, TRIGGERED_NOTIFICATION_CHANNEL_ID)
--                .setSmallIcon(R.drawable.ic_hearing_white)
--                .setContentTitle(getString(R.string.wake_service_triggered_notification))
--                .setStyle(NotificationCompat.BigTextStyle().bigText(
--                    getString(R.string.wake_service_triggered_notification_summary)))
--                .setPriority(NotificationCompat.PRIORITY_HIGH)
--                .setFullScreenIntent(pendingIntent, true)
--                .build()
++
 +        notificationManager.cancel(TRIGGERED_NOTIFICATION_ID)
 +        notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
 +    }
- 
--            notificationManager.cancel(TRIGGERED_NOTIFICATION_ID)
--            notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
--        }
++
 +    private fun showToast(text: String) {
 +        handler.post { android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_SHORT).show() }
      }
  
      companion object {
-@@ -362,8 +464,13 @@ class WakeService : Service() {
+@@ -362,8 +517,15 @@ class WakeService : Service() {
              "org.stypox.dicio.io.wake.WakeService.TRIGGERED"
          private const val FOREGROUND_NOTIFICATION_ID = 19803672
          private const val START_NOTIFICATION_ID = 48019274
@@ -600,6 +667,8 @@ index 81e12139..138cd29c 100644
 +        private const val OVERLAY_DURATION_MILLIS = 3000L
 +        private const val WAKE_LOCK_MILLIS = 10000L
 +        private const val SCREEN_ON_DELAY_MILLIS = 500L
++        private const val UNLOCK_WAIT_MILLIS = 60000L
++        private const val AFTER_UNLOCK_DELAY_MILLIS = 400L
 +        private const val TRIGGERED_NOTIFICATION_TIMEOUT_MILLIS = 30000L
          private const val WAKE_WORD_BACKOFF_MILLIS = 4000L
 +        private const val MIC_PAUSE_AFTER_WAKE_MILLIS = 20000L
