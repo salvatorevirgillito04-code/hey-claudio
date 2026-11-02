@@ -1,5 +1,5 @@
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index f7ffad93..ebc454cf 100644
+index f7ffad93..3b037acd 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
 @@ -30,10 +30,10 @@ android {
@@ -11,7 +11,7 @@ index f7ffad93..ebc454cf 100644
          minSdk = libs.versions.minSdk.get().toInt()
          targetSdk = libs.versions.targetSdk.get().toInt()
 -        versionCode = 19
-+        versionCode = 23
++        versionCode = 24
          versionName = "4.2"
          testInstrumentationRunner = "org.stypox.dicio.CustomTestRunner"
  
@@ -31,6 +31,16 @@ index f7ffad93..ebc454cf 100644
              }
          }
          release {
+@@ -132,6 +131,9 @@ tasks.withType(UnicodeCldrLanguagesTask::class) {
+ }
+ 
+ dependencies {
++    // Dicio per Claude: to call SearchManager.launchAssist()
++    implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.1")
++
+     // Desugaring
+     coreLibraryDesugaring(libs.desugar.jdk.libs)
+ 
 diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
 index c66e4da0..80fc0c04 100644
 --- a/app/src/main/AndroidManifest.xml
@@ -155,6 +165,72 @@ index 4a8b8c31..709beeb7 100644
          var isCreated: Int = 0
              private set
  
+diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/ClaudeAssist.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/ClaudeAssist.kt
+new file mode 100644
+index 00000000..fb8b54bd
+--- /dev/null
++++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/ClaudeAssist.kt
+@@ -0,0 +1,60 @@
++package org.stypox.dicio.io.wake
++
++import android.app.SearchManager
++import android.content.Context
++import android.os.Build
++import android.os.Bundle
++import android.provider.Settings
++import android.util.Log
++import org.lsposed.hiddenapibypass.HiddenApiBypass
++
++/**
++ * PATCH (Dicio per Claude): opens the default digital assistant (Claude) exactly like a long press
++ * of the power button does, i.e. Claude's voice assistant panel shown over the current screen,
++ * also over the lock screen.
++ *
++ * It calls SearchManager.launchAssist(), which is a hidden API: the system service behind it
++ * (SearchManagerService.launchAssist -> StatusBarManagerInternal.startAssist) does not require
++ * any permission, but the method is hidden from normal apps, so HiddenApiBypass is used.
++ */
++object ClaudeAssist {
++    private const val TAG = "ClaudeAssist"
++
++    /**
++     * Returns true if Claude is the default digital assistant, false if another app is, null if
++     * it could not be determined.
++     */
++    fun isClaudeDefaultAssistant(context: Context): Boolean? {
++        for (key in listOf("assistant", "voice_interaction_service")) {
++            try {
++                val value = Settings.Secure.getString(context.contentResolver, key)
++                if (!value.isNullOrEmpty()) {
++                    return value.startsWith(ClaudeTrampolineActivity.CLAUDE_PACKAGE + "/")
++                }
++            } catch (e: Throwable) {
++                Log.w(TAG, "Cannot read secure setting $key", e)
++            }
++        }
++        return null
++    }
++
++    /** Returns true if the system accepted the request to show the assistant. */
++    fun launch(context: Context): Boolean {
++        return try {
++            val searchManager =
++                context.getSystemService(Context.SEARCH_SERVICE) as SearchManager
++            val args = Bundle()
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
++                HiddenApiBypass.invoke(SearchManager::class.java, searchManager, "launchAssist", args)
++            } else {
++                SearchManager::class.java.getMethod("launchAssist", Bundle::class.java)
++                    .invoke(searchManager, args)
++            }
++            Log.d(TAG, "launchAssist called")
++            true
++        } catch (e: Throwable) {
++            Log.w(TAG, "launchAssist failed", e)
++            false
++        }
++    }
++}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/ClaudeTrampolineActivity.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/ClaudeTrampolineActivity.kt
 new file mode 100644
 index 00000000..0d7939a9
@@ -297,7 +373,7 @@ index 00000000..0d7939a9
 +    }
 +}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
-index 81e12139..d9045e74 100644
+index 81e12139..138cd29c 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 @@ -210,7 +210,17 @@ class WakeService : Service() {
@@ -319,16 +395,12 @@ index 81e12139..d9045e74 100644
                  }
  
                  lastHeard.set(Instant.now())
-@@ -221,59 +231,133 @@ class WakeService : Service() {
+@@ -221,59 +231,151 @@ class WakeService : Service() {
          }
      }
  
 -    private fun onWakeWordDetected() {
 -        Log.d(TAG, "Wake word detected")
--
--        val intent = Intent(this, MainActivity::class.java)
--        intent.setAction(ACTION_WAKE_WORD)
--        intent.setFlags(FLAG_ACTIVITY_NEW_TASK)
 +    /**
 +     * PATCH (Dicio per Claude): instead of opening Dicio, the wake word opens Claude through
 +     * [ClaudeTrampolineActivity], which also works with the screen off and over the lock screen.
@@ -347,11 +419,29 @@ index 81e12139..d9045e74 100644
 +            return false
 +        }
  
+-        val intent = Intent(this, MainActivity::class.java)
+-        intent.setAction(ACTION_WAKE_WORD)
+-        intent.setFlags(FLAG_ACTIVITY_NEW_TASK)
++        val wasScreenOff = wakeUpScreen()
++
++        // Preferred way: show Claude's assistant panel, exactly like a long press of the power
++        // button does (also over the lock screen), if Claude is the default digital assistant.
++        if (ClaudeAssist.isClaudeDefaultAssistant(this) != false) {
++            val launched = java.util.concurrent.atomic.AtomicBoolean(false)
++            val latch = java.util.concurrent.CountDownLatch(1)
++            handler.postDelayed({
++                launched.set(ClaudeAssist.launch(this))
++                latch.countDown()
++            }, if (wasScreenOff) SCREEN_ON_DELAY_MILLIS else 0L)
++            latch.await(SCREEN_ON_DELAY_MILLIS + 2000L, java.util.concurrent.TimeUnit.MILLISECONDS)
++            if (launched.get()) return true
++        } else {
++            showToast("Imposta Claude come assistente digitale predefinito")
++        }
+ 
 -        // Start listening and pass STT events to the skill evaluator.
 -        // Note that this works even if the MainActivity is opened later!
 -        sttInputDevice.tryLoad(skillEvaluator::processInputEvent)
-+        wakeUpScreen()
-+
 +        val intent = Intent(this, ClaudeTrampolineActivity::class.java)
 +            .addFlags(FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
 +
@@ -379,19 +469,22 @@ index 81e12139..d9045e74 100644
 -        // Unload the STT after a while because it would be using RAM uselessly
 -        handler.removeCallbacks(releaseSttResourcesRunnable)
 -        handler.postDelayed(releaseSttResourcesRunnable, RELEASE_STT_RESOURCES_MILLIS)
++    /** Returns true if the screen was off (and has been turned on). */
 +    @Suppress("DEPRECATION")
-+    private fun wakeUpScreen() {
++    private fun wakeUpScreen(): Boolean {
 +        try {
-+            val pm = getSystemService(this, android.os.PowerManager::class.java) ?: return
-+            if (pm.isInteractive) return
++            val pm = getSystemService(this, android.os.PowerManager::class.java) ?: return false
++            if (pm.isInteractive) return false
 +            pm.newWakeLock(
 +                android.os.PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
 +                        android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP or
 +                        android.os.PowerManager.ON_AFTER_RELEASE,
 +                "dicio:heyclaudio"
 +            ).acquire(WAKE_LOCK_MILLIS)
++            return true
 +        } catch (e: Exception) {
 +            Log.w(TAG, "Could not wake up the screen", e)
++            return false
 +        }
 +    }
  
@@ -498,7 +591,7 @@ index 81e12139..d9045e74 100644
      }
  
      companion object {
-@@ -362,8 +446,12 @@ class WakeService : Service() {
+@@ -362,8 +464,13 @@ class WakeService : Service() {
              "org.stypox.dicio.io.wake.WakeService.TRIGGERED"
          private const val FOREGROUND_NOTIFICATION_ID = 19803672
          private const val START_NOTIFICATION_ID = 48019274
@@ -506,6 +599,7 @@ index 81e12139..d9045e74 100644
 +        const val TRIGGERED_NOTIFICATION_ID = 601398647
 +        private const val OVERLAY_DURATION_MILLIS = 3000L
 +        private const val WAKE_LOCK_MILLIS = 10000L
++        private const val SCREEN_ON_DELAY_MILLIS = 500L
 +        private const val TRIGGERED_NOTIFICATION_TIMEOUT_MILLIS = 30000L
          private const val WAKE_WORD_BACKOFF_MILLIS = 4000L
 +        private const val MIC_PAUSE_AFTER_WAKE_MILLIS = 20000L
