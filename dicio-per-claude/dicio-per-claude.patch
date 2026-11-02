@@ -1,5 +1,5 @@
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index f7ffad93..dcbeb879 100644
+index f7ffad93..62073f31 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
 @@ -30,10 +30,10 @@ android {
@@ -11,7 +11,7 @@ index f7ffad93..dcbeb879 100644
          minSdk = libs.versions.minSdk.get().toInt()
          targetSdk = libs.versions.targetSdk.get().toInt()
 -        versionCode = 19
-+        versionCode = 28
++        versionCode = 29
          versionName = "4.2"
          testInstrumentationRunner = "org.stypox.dicio.CustomTestRunner"
  
@@ -42,10 +42,10 @@ index f7ffad93..dcbeb879 100644
      coreLibraryDesugaring(libs.desugar.jdk.libs)
  
 diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
-index c66e4da0..8f1b1f06 100644
+index c66e4da0..9a8e1b52 100644
 --- a/app/src/main/AndroidManifest.xml
 +++ b/app/src/main/AndroidManifest.xml
-@@ -10,7 +10,15 @@
+@@ -10,7 +10,17 @@
      <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
      <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
      <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
@@ -55,6 +55,8 @@ index c66e4da0..8f1b1f06 100644
 +    <!-- Dicio per Claude: wake up the screen and keep listening with the screen off -->
 +    <uses-permission android:name="android.permission.WAKE_LOCK" />
 +    <uses-permission android:name="android.permission.VIBRATE" />
++    <!-- Dicio per Claude: turn on the speakerphone for "chiama X in vivavoce" -->
++    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 +    <!-- Dicio per Claude: restart the wake word service quickly if the app gets killed -->
 +    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 +    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
@@ -62,7 +64,7 @@ index c66e4da0..8f1b1f06 100644
  
      <!-- required by the download manager for APIs < Q -->
      <uses-permission
-@@ -42,6 +50,7 @@
+@@ -42,6 +52,7 @@
          <activity
              android:name=".MainActivity"
              android:exported="true"
@@ -70,7 +72,7 @@ index c66e4da0..8f1b1f06 100644
              android:windowSoftInputMode="adjustResize"
              android:launchMode="singleTop"
              android:showOnLockScreen="true">
-@@ -66,6 +75,33 @@
+@@ -66,6 +77,33 @@
                  android:resource="@xml/shortcuts" />
          </activity>
  
@@ -104,7 +106,7 @@ index c66e4da0..8f1b1f06 100644
          <activity
              android:name=".error.ErrorActivity"
              android:exported="false" />
-@@ -102,16 +138,6 @@
+@@ -102,16 +140,6 @@
                  android:resource="@xml/stt_service_metadata" />
          </service>
  
@@ -122,10 +124,10 @@ index c66e4da0..8f1b1f06 100644
          <receiver
              android:name=".io.wake.BootBroadcastReceiver"
 diff --git a/app/src/main/kotlin/org/stypox/dicio/MainActivity.kt b/app/src/main/kotlin/org/stypox/dicio/MainActivity.kt
-index 4a8b8c31..709beeb7 100644
+index 4a8b8c31..b8543f2b 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/MainActivity.kt
 +++ b/app/src/main/kotlin/org/stypox/dicio/MainActivity.kt
-@@ -93,6 +93,57 @@ class MainActivity : BaseActivity() {
+@@ -93,6 +93,85 @@ class MainActivity : BaseActivity() {
      override fun onStart() {
          isInForeground += 1
          super.onStart()
@@ -138,6 +140,22 @@ index 4a8b8c31..709beeb7 100644
 +     * app launch, so the user is never stuck in a loop).
 +     */
 +    private fun askNextClaudePermission() {
++        // phone calls with "Hey Claudio, chiama Mario": contacts + phone runtime permissions
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !callPermissionsAsked) {
++            val missing = arrayOf(Manifest.permission.READ_CONTACTS, Manifest.permission.CALL_PHONE)
++                .filter { checkSelfPermission(it) != android.content.pm.PackageManager.PERMISSION_GRANTED }
++            if (missing.isNotEmpty()) {
++                callPermissionsAsked = true
++                android.widget.Toast.makeText(
++                    this,
++                    "Per chiamare a voce (\"Hey Claudio, chiama Mario\") consenti l'accesso ai Contatti e al Telefono",
++                    android.widget.Toast.LENGTH_LONG
++                ).show()
++                requestPermissions(missing.toTypedArray(), CALL_PERMISSIONS_REQUEST_CODE)
++                return
++            }
++        }
++
 +        val pkg = android.net.Uri.parse("package:$packageName")
 +        val steps = mutableListOf<Triple<String, () -> Boolean, Intent>>()
 +        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -180,14 +198,28 @@ index 4a8b8c31..709beeb7 100644
 +            }
 +            return
 +        }
++    }
++
++    @Deprecated("Deprecated in Java")
++    override fun onRequestPermissionsResult(
++        requestCode: Int,
++        permissions: Array<String>,
++        grantResults: IntArray
++    ) {
++        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
++        if (requestCode == CALL_PERMISSIONS_REQUEST_CODE) {
++            askNextClaudePermission()
++        }
      }
  
      override fun onStop() {
-@@ -176,6 +227,7 @@ class MainActivity : BaseActivity() {
+@@ -176,6 +255,9 @@ class MainActivity : BaseActivity() {
  
          var isInForeground: Int = 0
              private set
 +        private val claudePermissionsAsked = mutableSetOf<String>()
++        private var callPermissionsAsked = false
++        private const val CALL_PERMISSIONS_REQUEST_CODE = 4711
          var isCreated: Int = 0
              private set
  
@@ -551,10 +583,18 @@ index 00000000..c578f293
 +    }
 +}
 diff --git a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
-index 81e12139..dc8fe255 100644
+index 81e12139..97cfb108 100644
 --- a/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
 +++ b/app/src/main/kotlin/org/stypox/dicio/io/wake/WakeService.kt
-@@ -86,10 +86,24 @@ class WakeService : Service() {
+@@ -35,6 +35,7 @@ import org.stypox.dicio.R
+ import org.stypox.dicio.di.SttInputDeviceWrapper
+ import org.stypox.dicio.di.WakeDeviceWrapper
+ import org.stypox.dicio.eval.SkillEvaluator
++import org.stypox.dicio.io.input.InputEvent
+ import java.time.Instant
+ import java.util.concurrent.atomic.AtomicBoolean
+ import java.util.concurrent.atomic.AtomicReference
+@@ -86,10 +87,24 @@ class WakeService : Service() {
  
      override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
          if (intent?.action == ACTION_STOP_WAKE_SERVICE) {
@@ -579,18 +619,26 @@ index 81e12139..dc8fe255 100644
          try {
              createForegroundNotification(wakeDevice.isHeyDicio.value)
          } catch (t: Throwable) {
-@@ -116,6 +130,10 @@ class WakeService : Service() {
+@@ -116,6 +131,18 @@ class WakeService : Service() {
              }
          }
  
 +        WakeRestart.scheduleCheck(this, WakeRestart.WATCHDOG_INTERVAL_MILLIS)
 +        notificationManager.cancel(START_NOTIFICATION_ID)
++        // PATCH (Dicio per Claude): keep the speech recognition model ready for phone call requests
++        handler.post {
++            try {
++                sttInputDevice.tryLoad(null)
++            } catch (e: Exception) {
++                Log.w(TAG, "Could not preload STT", e)
++            }
++        }
 +        handler.post { unregisterScreenOnReceiver() }
 +
          scope.launch {
              try {
                  listenForWakeWord()
-@@ -128,7 +146,72 @@ class WakeService : Service() {
+@@ -128,7 +155,72 @@ class WakeService : Service() {
          return START_STICKY
      }
  
@@ -663,7 +711,7 @@ index 81e12139..dc8fe255 100644
          listening.set(false)
          job.cancel()
          wakeDevice.reinitializeToReleaseResources()
-@@ -210,7 +293,14 @@ class WakeService : Service() {
+@@ -210,7 +302,14 @@ class WakeService : Service() {
                  val wakeWordDetected = wakeDevice.processFrame(audio)
                  if (wakeWordDetected && Instant.now() > nextWakeWordAllowed) {
                      nextWakeWordAllowed = Instant.now().plusMillis(WAKE_WORD_BACKOFF_MILLIS)
@@ -679,16 +727,11 @@ index 81e12139..dc8fe255 100644
                  }
  
                  lastHeard.set(Instant.now())
-@@ -221,61 +311,263 @@ class WakeService : Service() {
+@@ -221,61 +320,352 @@ class WakeService : Service() {
          }
      }
  
 -    private fun onWakeWordDetected() {
--        Log.d(TAG, "Wake word detected")
--
--        val intent = Intent(this, MainActivity::class.java)
--        intent.setAction(ACTION_WAKE_WORD)
--        intent.setFlags(FLAG_ACTIVITY_NEW_TASK)
 +    /**
 +     * PATCH (Dicio per Claude): instead of opening Dicio, the wake word opens Claude through
 +     * [ClaudeTrampolineActivity], which also works with the screen off and over the lock screen.
@@ -699,19 +742,118 @@ index 81e12139..dc8fe255 100644
 +     * The trampoline ignores the second start if both arrive.
 +     */
 +    private fun onWakeWordDetected(): Boolean {
-+        Log.d(TAG, "Wake word detected, opening Claude")
-+
-+        if (!ClaudeTrampolineActivity.isClaudeInstalled(this)) {
-+            Log.w(TAG, "Claude app is not installed")
-+            showToast("App Claude non trovata")
-+            return false
-+        }
+         Log.d(TAG, "Wake word detected")
+ 
+-        val intent = Intent(this, MainActivity::class.java)
+-        intent.setAction(ACTION_WAKE_WORD)
+-        intent.setFlags(FLAG_ACTIVITY_NEW_TASK)
++        vibrateHeard()
++        val wasScreenOff = wakeUpScreen()
  
 -        // Start listening and pass STT events to the skill evaluator.
 -        // Note that this works even if the MainActivity is opened later!
 -        sttInputDevice.tryLoad(skillEvaluator::processInputEvent)
-+        vibrateHeard()
-+        val wasScreenOff = wakeUpScreen()
++        // PATCH (Dicio per Claude): listen to what comes after "Hey Claudio": phone calls are
++        // handled by Dicio's telephone skill, everything else goes to Claude
++        micPausedUntil = Instant.now().plusMillis(COMMAND_MAX_MILLIS)
++        handler.post { listenForCommand(wasScreenOff) }
++        return true
++    }
++
++    private var commandSession = 0
++
++    /** Must be called on the main thread. */
++    private fun listenForCommand(wasScreenOff: Boolean) {
++        val session = ++commandSession
++        var decided = false
++        var heardSomething = false
++        val timeouts = mutableListOf<Runnable>()
++
++        fun clearTimeouts() {
++            timeouts.forEach { handler.removeCallbacks(it) }
++            timeouts.clear()
++        }
++
++        fun decideClaude(reason: String) {
++            if (decided || session != commandSession) return
++            decided = true
++            clearTimeouts()
++            Log.d(TAG, "Opening Claude: $reason")
++            try {
++                sttInputDevice.stopListening()
++            } catch (e: Exception) {
++                Log.w(TAG, "Could not stop STT", e)
++            }
++            scope.launch { openClaude(wasScreenOff) }
++        }
++
++        val listener: (InputEvent) -> Unit = { event ->
++            handler.post {
++                if (decided || session != commandSession) return@post
++                when (event) {
++                    is InputEvent.Partial -> {
++                        val words = cleanCommand(event.utterance).split(' ').filter { it.isNotEmpty() }
++                        if (words.isNotEmpty()) {
++                            heardSomething = true
++                            if (words.size >= 2 && !isCallWord(words[0])) {
++                                decideClaude("not a call: ${words.joinToString(" ")}")
++                            }
++                        }
++                    }
++                    is InputEvent.Final -> {
++                        val cleaned = event.utterances.map { Pair(cleanCommand(it.first), it.second) }
++                        val best = cleaned.firstOrNull()?.first ?: ""
++                        if (isCallWord(best.substringBefore(' '))) {
++                            decided = true
++                            clearTimeouts()
++                            Log.d(TAG, "Phone call request: $best")
++                            skillEvaluator.processInputEvent(InputEvent.Final(cleaned))
++                        } else {
++                            decideClaude("final: $best")
++                        }
++                    }
++                    InputEvent.None -> decideClaude("nothing said")
++                    is InputEvent.Error -> decideClaude("STT error ${event.throwable}")
++                }
++            }
++        }
+ 
+-        // Unload the STT after a while because it would be using RAM uselessly
+-        handler.removeCallbacks(releaseSttResourcesRunnable)
+-        handler.postDelayed(releaseSttResourcesRunnable, RELEASE_STT_RESOURCES_MILLIS)
++        val started = try {
++            sttInputDevice.tryLoad(listener)
++        } catch (e: Exception) {
++            Log.w(TAG, "Could not start STT", e)
++            false
++        }
++        if (!started) {
++            decideClaude("STT not available")
++            return
++        }
+ 
+-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || MainActivity.isInForeground > 0) {
+-            // start the activity directly on versions prior to Android 10,
+-            // or if the MainActivity is already running in the foreground
+-            startActivity(intent)
++        val silenceTimeout = Runnable {
++            if (!heardSomething) decideClaude("silence after wake word")
++        }
++        val hardTimeout = Runnable { decideClaude("command timeout") }
++        timeouts += silenceTimeout
++        timeouts += hardTimeout
++        handler.postDelayed(silenceTimeout, COMMAND_SILENCE_MILLIS)
++        handler.postDelayed(hardTimeout, COMMAND_MAX_MILLIS)
++    }
+ 
++    /** Opens Claude; blocks for a short while, must NOT be called on the main thread. */
++    private fun openClaude(wasScreenOff: Boolean) {
++        if (!ClaudeTrampolineActivity.isClaudeInstalled(this)) {
++            Log.w(TAG, "Claude app is not installed")
++            showToast("App Claude non trovata")
++            return
++        }
++        micPausedUntil = Instant.now().plusMillis(MIC_PAUSE_AFTER_WAKE_MILLIS)
 +
 +        // Preferred way: show Claude's assistant panel, exactly like a long press of the power
 +        // button does (also over the lock screen), if Claude is the default digital assistant.
@@ -731,15 +873,23 @@ index 81e12139..dc8fe255 100644
 +                    micPausedUntil = Instant.now().plusMillis(UNLOCK_WAIT_MILLIS)
 +                    handler.post { openClaudeAfterUnlock() }
 +                }
-+                return true
++                return
 +            }
-+        } else {
+         } else {
+-            // Android 10+ does not allow starting activities from the background,
+-            // so show a full-screen notification instead, which does actually result in starting
+-            // the activity from the background if the phone is off and Do Not Disturb is not active
+-            // Maybe we could also use the "Display over other apps" permission?
 +            showToast("Imposta Claude come assistente digitale predefinito")
 +        }
  
--        // Unload the STT after a while because it would be using RAM uselessly
--        handler.removeCallbacks(releaseSttResourcesRunnable)
--        handler.postDelayed(releaseSttResourcesRunnable, RELEASE_STT_RESOURCES_MILLIS)
+-            val channel = NotificationChannel(
+-                TRIGGERED_NOTIFICATION_CHANNEL_ID,
+-                getString(R.string.wake_service_triggered_notification),
+-                NotificationManager.IMPORTANCE_HIGH
+-            )
+-            channel.description = getString(R.string.wake_service_triggered_notification_summary)
+-            notificationManager.createNotificationChannel(channel)
 +        val intent = Intent(this, ClaudeTrampolineActivity::class.java)
 +            .addFlags(FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
 +
@@ -761,13 +911,14 @@ index 81e12139..dc8fe255 100644
 +                handler.postDelayed({ removeOverlay(overlay) }, OVERLAY_DURATION_MILLIS)
 +            }
 +        }
-+        return true
++        return
 +    }
  
--        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || MainActivity.isInForeground > 0) {
--            // start the activity directly on versions prior to Android 10,
--            // or if the MainActivity is already running in the foreground
--            startActivity(intent)
+-            val pendingIntent = PendingIntent.getActivity(
+-                this,
+-                0,
+-                intent,
+-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
 +    @Volatile
 +    private var micPausedUntil: Instant = Instant.MIN
 +
@@ -790,12 +941,7 @@ index 81e12139..dc8fe255 100644
 +            Thread.sleep(500)
 +        }
 +    }
- 
--        } else {
--            // Android 10+ does not allow starting activities from the background,
--            // so show a full-screen notification instead, which does actually result in starting
--            // the activity from the background if the phone is off and Do Not Disturb is not active
--            // Maybe we could also use the "Display over other apps" permission?
++
 +    private fun isMicrophoneBusy(): Boolean {
 +        return try {
 +            val am = getSystemService(this, android.media.AudioManager::class.java) ?: return false
@@ -807,11 +953,7 @@ index 81e12139..dc8fe255 100644
 +            false
 +        }
 +    }
- 
--            val channel = NotificationChannel(
--                TRIGGERED_NOTIFICATION_CHANNEL_ID,
--                getString(R.string.wake_service_triggered_notification),
--                NotificationManager.IMPORTANCE_HIGH
++
 +    /** PATCH (Dicio per Claude): short vibration to confirm that "Hey Claudio" was heard. */
 +    @Suppress("DEPRECATION")
 +    private fun vibrateHeard() {
@@ -858,8 +1000,6 @@ index 81e12139..dc8fe255 100644
 +                this, receiver, android.content.IntentFilter(Intent.ACTION_USER_PRESENT),
 +                ContextCompat.RECEIVER_EXPORTED
              )
--            channel.description = getString(R.string.wake_service_triggered_notification_summary)
--            notificationManager.createNotificationChannel(channel)
 +            unlockReceiver = receiver
 +            handler.postDelayed(unlockTimeoutRunnable, UNLOCK_WAIT_MILLIS)
 +        } catch (e: Exception) {
@@ -867,12 +1007,14 @@ index 81e12139..dc8fe255 100644
 +        }
 +    }
  
--            val pendingIntent = PendingIntent.getActivity(
--                this,
--                0,
--                intent,
--                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
--            )
+-            val notification = NotificationCompat.Builder(this, TRIGGERED_NOTIFICATION_CHANNEL_ID)
+-                .setSmallIcon(R.drawable.ic_hearing_white)
+-                .setContentTitle(getString(R.string.wake_service_triggered_notification))
+-                .setStyle(NotificationCompat.BigTextStyle().bigText(
+-                    getString(R.string.wake_service_triggered_notification_summary)))
+-                .setPriority(NotificationCompat.PRIORITY_HIGH)
+-                .setFullScreenIntent(pendingIntent, true)
+-                .build()
 +    private fun unregisterUnlockReceiver() {
 +        handler.removeCallbacks(unlockTimeoutRunnable)
 +        unlockReceiver?.let {
@@ -885,14 +1027,8 @@ index 81e12139..dc8fe255 100644
 +        unlockReceiver = null
 +    }
  
--            val notification = NotificationCompat.Builder(this, TRIGGERED_NOTIFICATION_CHANNEL_ID)
--                .setSmallIcon(R.drawable.ic_hearing_white)
--                .setContentTitle(getString(R.string.wake_service_triggered_notification))
--                .setStyle(NotificationCompat.BigTextStyle().bigText(
--                    getString(R.string.wake_service_triggered_notification_summary)))
--                .setPriority(NotificationCompat.PRIORITY_HIGH)
--                .setFullScreenIntent(pendingIntent, true)
--                .build()
+-            notificationManager.cancel(TRIGGERED_NOTIFICATION_ID)
+-            notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
 +    /** Returns true if the screen was off (and has been turned on). */
 +    @Suppress("DEPRECATION")
 +    private fun wakeUpScreen(): Boolean {
@@ -909,9 +1045,9 @@ index 81e12139..dc8fe255 100644
 +        } catch (e: Exception) {
 +            Log.w(TAG, "Could not wake up the screen", e)
 +            return false
-+        }
-+    }
-+
+         }
+     }
+ 
 +    private fun showInvisibleOverlay(): android.view.View? {
 +        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
 +            !android.provider.Settings.canDrawOverlays(this)) return null
@@ -934,18 +1070,16 @@ index 81e12139..dc8fe255 100644
 +            null
 +        }
 +    }
- 
--            notificationManager.cancel(TRIGGERED_NOTIFICATION_ID)
--            notificationManager.notify(TRIGGERED_NOTIFICATION_ID, notification)
++
 +    private fun removeOverlay(view: android.view.View?) {
 +        if (view == null) return
 +        try {
 +            getSystemService(this, android.view.WindowManager::class.java)?.removeView(view)
 +        } catch (e: Exception) {
 +            Log.w(TAG, "Could not remove overlay", e)
-         }
-     }
- 
++        }
++    }
++
 +    private fun showFullScreenNotification(intent: Intent) {
 +        val channel = NotificationChannel(
 +            TRIGGERED_NOTIFICATION_CHANNEL_ID,
@@ -986,7 +1120,7 @@ index 81e12139..dc8fe255 100644
      companion object {
          /**
           * Starting from Android 11, it is not possible to start a foreground service
-@@ -308,10 +600,12 @@ class WakeService : Service() {
+@@ -308,10 +698,12 @@ class WakeService : Service() {
                  .setContentTitle(context.getString(R.string.wake_service_start_notification))
                  .setStyle(NotificationCompat.BigTextStyle().bigText(
                      context.getString(R.string.wake_service_start_notification_summary)))
@@ -1000,7 +1134,7 @@ index 81e12139..dc8fe255 100644
                  .build()
  
              notificationManager.notify(START_NOTIFICATION_ID, notification)
-@@ -324,6 +618,7 @@ class WakeService : Service() {
+@@ -324,6 +716,7 @@ class WakeService : Service() {
           */
          fun start(context: Context) {
              Log.d(TAG, "WakeService.start() called from ${Throwable().stackTrace[1]}")
@@ -1008,7 +1142,7 @@ index 81e12139..dc8fe255 100644
              val intent = Intent(context, WakeService::class.java)
              ContextCompat.startForegroundService(context, intent)
          }
-@@ -362,8 +657,17 @@ class WakeService : Service() {
+@@ -362,8 +755,36 @@ class WakeService : Service() {
              "org.stypox.dicio.io.wake.WakeService.TRIGGERED"
          private const val FOREGROUND_NOTIFICATION_ID = 19803672
          private const val START_NOTIFICATION_ID = 48019274
@@ -1022,6 +1156,25 @@ index 81e12139..dc8fe255 100644
 +        private const val TRIGGERED_NOTIFICATION_TIMEOUT_MILLIS = 30000L
          private const val WAKE_WORD_BACKOFF_MILLIS = 4000L
 +        private const val MIC_PAUSE_AFTER_WAKE_MILLIS = 8000L
++        private const val COMMAND_SILENCE_MILLIS = 2000L
++        private const val COMMAND_MAX_MILLIS = 10000L
++        private val LEADING_WAKE_WORDS = setOf(
++            "hey", "ehi", "ei", "hei", "eh", "e", "ok", "claudio", "claudia", "audio", "claud"
++        )
++        private val CALL_WORDS = setOf(
++            "chiama", "chiamami", "chiamare", "telefona", "telefonare", "telefonami",
++            "telefonagli", "telefonale"
++        )
++
++        fun cleanCommand(text: String): String {
++            val words = text.lowercase().trim().split(Regex("\\s+")).toMutableList()
++            while (words.isNotEmpty() && (words[0].isEmpty() || words[0] in LEADING_WAKE_WORDS)) {
++                words.removeAt(0)
++            }
++            return words.joinToString(" ")
++        }
++
++        fun isCallWord(word: String): Boolean = word in CALL_WORDS
 +        private const val MIC_IDLE_BEFORE_RESUME_MILLIS = 15000L
 +        private const val MAX_MIC_PAUSE_MILLIS = 1000L * 60 * 10 // 10 minutes
          private const val ACTION_STOP_WAKE_SERVICE =
@@ -1049,10 +1202,280 @@ index 9027a731..c7208456 100644
      private val userWakeFileExists = userWakeFile.exists()
      private val allModelFiles =
          // wakeFile is not needed if we want to use the userWakeFile instead
+diff --git a/app/src/main/kotlin/org/stypox/dicio/skills/telephone/ContactChooserIndex.kt b/app/src/main/kotlin/org/stypox/dicio/skills/telephone/ContactChooserIndex.kt
+index 31d787cb..d5ba4cca 100644
+--- a/app/src/main/kotlin/org/stypox/dicio/skills/telephone/ContactChooserIndex.kt
++++ b/app/src/main/kotlin/org/stypox/dicio/skills/telephone/ContactChooserIndex.kt
+@@ -14,6 +14,7 @@ import org.stypox.dicio.sentences.Sentences
+ class ContactChooserIndex internal constructor(
+     private val contacts: List<Pair<String, String>>,
+     private val yesNoData: StandardRecognizerData<Sentences.UtilYesNo>,
++    private val speaker: Boolean = false,
+ ) : Skill<Int>(TelephoneInfo, Specificity.HIGH) {
+ 
+     override fun score(
+@@ -34,7 +35,7 @@ class ContactChooserIndex internal constructor(
+     override suspend fun generateOutput(ctx: SkillContext, inputData: Int): SkillOutput {
+         if (inputData > 0 && inputData <= contacts.size) {
+             val contact = contacts[inputData - 1]
+-            return ConfirmCallOutput(contact.first, contact.second, yesNoData)
++            return DirectCallOutput.callNow(ctx, contact.first, contact.second, speaker)
+         } else {
+             // impossible situation
+             return ConfirmedCallOutput(null)
+diff --git a/app/src/main/kotlin/org/stypox/dicio/skills/telephone/ContactChooserName.kt b/app/src/main/kotlin/org/stypox/dicio/skills/telephone/ContactChooserName.kt
+index 3a66a962..5a478626 100644
+--- a/app/src/main/kotlin/org/stypox/dicio/skills/telephone/ContactChooserName.kt
++++ b/app/src/main/kotlin/org/stypox/dicio/skills/telephone/ContactChooserName.kt
+@@ -14,6 +14,7 @@ import org.stypox.dicio.util.StringUtils
+ class ContactChooserName internal constructor(
+     private val contacts: List<Pair<String, String>>,
+     private val yesNoData: StandardRecognizerData<Sentences.UtilYesNo>,
++    private val speaker: Boolean = false,
+ ) :
+     // use a low specificity to prefer the index-based contact chooser
+     Skill<Pair<String, String>?>(TelephoneInfo, Specificity.LOW) {
+@@ -43,7 +44,7 @@ class ContactChooserName internal constructor(
+ 
+     override suspend fun generateOutput(ctx: SkillContext, inputData: Pair<String, String>?): SkillOutput {
+         return inputData?.let {
+-            ConfirmCallOutput(it.first, it.second, yesNoData)
++            DirectCallOutput.callNow(ctx, it.first, it.second, speaker)
+         }
+             // impossible situation
+             ?: ConfirmedCallOutput(null)
+diff --git a/app/src/main/kotlin/org/stypox/dicio/skills/telephone/DirectCallOutput.kt b/app/src/main/kotlin/org/stypox/dicio/skills/telephone/DirectCallOutput.kt
+new file mode 100644
+index 00000000..07b9aef6
+--- /dev/null
++++ b/app/src/main/kotlin/org/stypox/dicio/skills/telephone/DirectCallOutput.kt
+@@ -0,0 +1,12 @@
++package org.stypox.dicio.skills.telephone
++
++import org.dicio.skill.context.SkillContext
++import org.dicio.skill.skill.SkillOutput
++
++/** PATCH (Dicio per Claude): calls right away, without asking for confirmation. */
++object DirectCallOutput {
++    fun callNow(ctx: SkillContext, name: String, number: String, speaker: Boolean): SkillOutput {
++        TelephoneSkill.call(ctx.android, number, speaker)
++        return ConfirmedCallOutput(number)
++    }
++}
+diff --git a/app/src/main/kotlin/org/stypox/dicio/skills/telephone/TelephoneOutput.kt b/app/src/main/kotlin/org/stypox/dicio/skills/telephone/TelephoneOutput.kt
+index 283a66f5..40f24bd9 100644
+--- a/app/src/main/kotlin/org/stypox/dicio/skills/telephone/TelephoneOutput.kt
++++ b/app/src/main/kotlin/org/stypox/dicio/skills/telephone/TelephoneOutput.kt
+@@ -22,6 +22,7 @@ import org.stypox.dicio.util.getString
+ class TelephoneOutput(
+     private val contacts: List<Pair<String, List<String>>>,
+     private val yesNoData: StandardRecognizerData<Sentences.UtilYesNo>,
++    private val speaker: Boolean = false,
+ ) : SkillOutput {
+     override fun getSpeechOutput(ctx: SkillContext): String = if (contacts.isEmpty()) {
+         ctx.getString(R.string.skill_telephone_unknown_contact)
+@@ -30,12 +31,16 @@ class TelephoneOutput(
+     }
+ 
+     override fun getInteractionPlan(ctx: SkillContext): InteractionPlan {
++        // PATCH (Dicio per Claude): nobody found, nothing to choose
++        if (contacts.isEmpty()) return InteractionPlan.FinishInteraction
++
+         val nextSkills = mutableListOf<Skill<*>>(
+             ContactChooserName(
+                 // when saying the name, there is no way to distinguish between
+                 // different numbers, so just use the first one
+                 contacts.map { Pair(it.first, it.second[0]) },
+                 yesNoData,
++                speaker,
+             )
+         )
+ 
+@@ -48,6 +53,7 @@ class TelephoneOutput(
+                         }
+                     },
+                     yesNoData,
++                    speaker,
+                 )
+             )
+         }
+diff --git a/app/src/main/kotlin/org/stypox/dicio/skills/telephone/TelephoneSkill.kt b/app/src/main/kotlin/org/stypox/dicio/skills/telephone/TelephoneSkill.kt
+index 40106383..b381ed51 100644
+--- a/app/src/main/kotlin/org/stypox/dicio/skills/telephone/TelephoneSkill.kt
++++ b/app/src/main/kotlin/org/stypox/dicio/skills/telephone/TelephoneSkill.kt
+@@ -1,8 +1,18 @@
+ package org.stypox.dicio.skills.telephone
+ 
++import android.Manifest
+ import android.content.Context
+ import android.content.Intent
++import android.content.pm.PackageManager
++import android.media.AudioDeviceInfo
++import android.media.AudioManager
+ import android.net.Uri
++import android.os.Build
++import android.os.Bundle
++import android.os.Handler
++import android.os.Looper
++import android.telecom.TelecomManager
++import android.util.Log
+ import org.dicio.skill.context.SkillContext
+ import org.dicio.skill.skill.SkillInfo
+ import org.dicio.skill.skill.SkillOutput
+@@ -19,9 +29,11 @@ class TelephoneSkill(
+ 
+     override suspend fun generateOutput(ctx: SkillContext, inputData: Telephone): SkillOutput {
+         val contentResolver = ctx.android.contentResolver
+-        val userContactName = when (inputData) {
++        val rawContactName = when (inputData) {
+             is Telephone.Dial -> inputData.who?.trim { it <= ' ' } ?: ""
+         }
++        // PATCH (Dicio per Claude): "chiama X in vivavoce" / "con il vivavoce" / "col vivavoce"
++        val (userContactName, speaker) = extractSpeakerphone(rawContactName)
+         val contacts = Contact.getFilteredSortedContacts(contentResolver, userContactName)
+         val validContacts = ArrayList<Pair<String, List<String>>>()
+ 
+@@ -40,7 +52,8 @@ class TelephoneSkill(
+                         || contacts[i + 1].distance - 2 > contact.distance)
+             ) {
+                 // very close match with just one number and without distance ties: call it directly
+-                return ConfirmCallOutput(contact.name, numbers[0], yesNoData)
++                // PATCH (Dicio per Claude): without asking for confirmation
++                return DirectCallOutput.callNow(ctx, contact.name, numbers[0], speaker)
+             }
+             validContacts.add(Pair(contact.name, numbers))
+             ++i
+@@ -54,19 +67,108 @@ class TelephoneSkill(
+         ) {
+             // not a good enough match, but since we have only this, call it directly
+             val contact = validContacts[0]
+-            return ConfirmCallOutput(contact.first, contact.second[0], yesNoData)
++            return DirectCallOutput.callNow(ctx, contact.first, contact.second[0], speaker)
+         }
+ 
+         // this point will not be reached if a very close match was found
+-        return TelephoneOutput(validContacts, yesNoData)
++        return TelephoneOutput(validContacts, yesNoData, speaker)
+     }
+ 
+     companion object {
+-        fun call(context: Context, number: String?) {
+-            val callIntent = Intent(Intent.ACTION_CALL)
+-            callIntent.data = Uri.parse("tel:$number")
+-            callIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+-            context.startActivity(callIntent)
++        private const val TAG = "TelephoneSkill"
++
++        private val SPEAKER_SUFFIX = Regex(
++            """\s*\b(?:in|con\s+il|con\s+l|col|con|nel|a)\s+(?:viva\s*voce|altoparlante)\s*$""",
++            RegexOption.IGNORE_CASE
++        )
++        private val SPEAKER_PREFIX = Regex(
++            """^\s*(?:in|con\s+il|col|con)\s+(?:viva\s*voce|altoparlante)\s+""",
++            RegexOption.IGNORE_CASE
++        )
++
++        /** Returns the contact name without the speakerphone words, and whether they were said. */
++        fun extractSpeakerphone(who: String): Pair<String, Boolean> {
++            var name = who
++            var speaker = false
++            SPEAKER_SUFFIX.find(name)?.let {
++                name = name.removeRange(it.range)
++                speaker = true
++            }
++            SPEAKER_PREFIX.find(name)?.let {
++                name = name.removeRange(it.range)
++                speaker = true
++            }
++            return Pair(name.trim(), speaker)
++        }
++
++        fun call(context: Context, number: String?) = call(context, number, false)
++
++        /**
++         * PATCH (Dicio per Claude): places the call through TelecomManager.placeCall (works also
++         * from the background), asking to start it with the speakerphone on if [speaker]. As a
++         * fallback, the speakerphone is also turned on through AudioManager once the call started.
++         */
++        fun call(context: Context, number: String?, speaker: Boolean) {
++            if (number == null) return
++            val uri = Uri.fromParts("tel", number, null)
++            var placed = false
++
++            val telecom = context.getSystemService(TelecomManager::class.java)
++            if (telecom != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
++                context.checkSelfPermission(Manifest.permission.CALL_PHONE) ==
++                PackageManager.PERMISSION_GRANTED
++            ) {
++                try {
++                    val extras = Bundle()
++                    extras.putBoolean(TelecomManager.EXTRA_START_CALL_WITH_SPEAKERPHONE, speaker)
++                    telecom.placeCall(uri, extras)
++                    placed = true
++                } catch (e: Exception) {
++                    Log.w(TAG, "placeCall failed, using ACTION_CALL", e)
++                }
++            }
++
++            if (!placed) {
++                val callIntent = Intent(Intent.ACTION_CALL, uri)
++                callIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
++                callIntent.putExtra(TelecomManager.EXTRA_START_CALL_WITH_SPEAKERPHONE, speaker)
++                context.startActivity(callIntent)
++            }
++
++            if (speaker) {
++                scheduleSpeakerphoneFallback(context.applicationContext)
++            }
++        }
++
++        private fun scheduleSpeakerphoneFallback(context: Context) {
++            val handler = Handler(Looper.getMainLooper())
++            for (delay in longArrayOf(1500L, 3000L, 5000L, 8000L)) {
++                handler.postDelayed({ ensureSpeakerphone(context) }, delay)
++            }
++        }
++
++        @Suppress("DEPRECATION")
++        private fun ensureSpeakerphone(context: Context) {
++            try {
++                val am = context.getSystemService(AudioManager::class.java) ?: return
++                if (am.mode != AudioManager.MODE_IN_CALL &&
++                    am.mode != AudioManager.MODE_IN_COMMUNICATION) return
++                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
++                    if (am.communicationDevice?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) return
++                    val speakerDevice = am.availableCommunicationDevices
++                        .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
++                    if (speakerDevice != null && am.setCommunicationDevice(speakerDevice)) {
++                        Log.d(TAG, "Speakerphone turned on with setCommunicationDevice")
++                        return
++                    }
++                }
++                if (!am.isSpeakerphoneOn) {
++                    am.isSpeakerphoneOn = true
++                    Log.d(TAG, "Speakerphone turned on with setSpeakerphoneOn")
++                }
++            } catch (e: Exception) {
++                Log.w(TAG, "Could not turn on the speakerphone", e)
++            }
+         }
+     }
+ }
 diff --git a/app/src/main/res/values-it/strings.xml b/app/src/main/res/values-it/strings.xml
-index 40adb5a1..e9636119 100644
+index 40adb5a1..20e5e6f2 100644
 --- a/app/src/main/res/values-it/strings.xml
 +++ b/app/src/main/res/values-it/strings.xml
+@@ -106,8 +106,8 @@
+     <string name="skill_navigation_navigating_to">Navigo verso %1$s</string>
+     <string name="skill_name_telephone">Telefono</string>
+     <string name="skill_sentence_example_telephone">Chiama Lorenzo</string>
+-    <string name="skill_telephone_unknown_contact">Nessun contatto trovato, riprova</string>
+-    <string name="skill_telephone_found_contacts">Ho trovato %1$d contatti, quale devo chiamare?</string>
++    <string name="skill_telephone_unknown_contact">Non ho trovato nessun contatto con questo nome</string>
++    <string name="skill_telephone_found_contacts">Ho trovato %1$d contatti simili, quale devo chiamare? Dimmi il nome</string>
+     <string name="skill_telephone_confirm_call">Devo chiamare %1$s?</string>
+     <string name="skill_telephone_calling">Sto chiamando %1$s…</string>
+     <string name="skill_telephone_not_calling">Va bene, non chiamo nessuno</string>
 @@ -166,16 +166,16 @@
      <string name="pref_stt_play_sound_alarm">Canale delle sveglie</string>
      <string name="stt_service_label">Riconoscimento vocale offline di Dicio</string>

@@ -22,4 +22,4 @@ Addestramento basato su [openWakeWord](https://github.com/dscripka/openWakeWord)
 
 Versione modificata di Dicio in cui "Hey Claudio" apre direttamente Claude come assistente vocale, senza dover dire "apri Claude". Le modifiche sono in `dicio-per-claude/dicio-per-claude.patch` (da applicare al commit di Dicio indicato in `BASE_COMMIT`, copiando anche `hey_claudio.tflite` in `app/src/main/assets/`).
 
-APK pronto: `apk/dicio-per-claude-v10.apk`. Apre Claude sia a schermo acceso sia a schermo spento (se il telefono ha PIN/impronta chiede prima lo sblocco).
+APK pronto: `apk/dicio-per-claude-v11.apk`. Apre Claude sia a schermo acceso sia a schermo spento (se il telefono ha PIN/impronta chiede prima lo sblocco).
